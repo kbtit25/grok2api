@@ -8,7 +8,7 @@ import inspect
 import secrets
 from loguru import logger
 from pathlib import Path
-
+import uuid
 import requests
 from flask import Flask, request, Response, jsonify, stream_with_context, render_template, redirect, session
 from curl_cffi import requests as curl_requests
@@ -128,6 +128,45 @@ CONFIG = {
     "ISSHOW_SEARCH_RESULTS": os.environ.get("ISSHOW_SEARCH_RESULTS", "true").lower() == "true"
 }
 
+def fetch_statsig_data():
+    """
+    请求 https://rui.soundai.ee/x.php 接口获取 x_statsig_id 数据
+    """
+    url = "https://rui.soundai.ee/x.php"
+    
+    try:
+        # 发送GET请求
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()  # 检查HTTP状态码
+        
+        # 解析JSON响应
+        data = response.json()
+        
+        # 提取x_statsig_id
+        x_statsig_id = data.get('x_statsig_id')
+        
+        return {
+            'success': True,
+            'data': data,
+            'x_statsig_id': x_statsig_id
+        }
+        
+    except requests.exceptions.RequestException as e:
+        return {
+            'success': False,
+            'error': f'请求错误: {e}'
+        }
+    except json.JSONDecodeError as e:
+        return {
+            'success': False,
+            'error': f'JSON解析错误: {e}',
+            'raw_response': response.text if 'response' in locals() else None
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': f'未知错误: {e}'
+        }
 
 DEFAULT_HEADERS = {
     'Accept': '*/*',
@@ -137,13 +176,15 @@ DEFAULT_HEADERS = {
     'Connection': 'keep-alive',
     'Origin': 'https://grok.com',
     'Priority': 'u=1, i',
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
     'Sec-Ch-Ua': '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
     'Sec-Ch-Ua-Mobile': '?0',
     'Sec-Ch-Ua-Platform': '"macOS"',
     'Sec-Fetch-Dest': 'empty',
     'Sec-Fetch-Mode': 'cors',
     'Sec-Fetch-Site': 'same-origin',
+    'X-Statsig-Id': fetch_statsig_data()['x_statsig_id'],
+    'X-Xai-Request-Id': str(uuid.uuid4()),
     'Baggage': 'sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c'
 }
 
