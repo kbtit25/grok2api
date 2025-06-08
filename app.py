@@ -131,22 +131,20 @@ CONFIG = {
 
 def fetch_statsig_data():
     """
-    使用自主方法生成 x_statsig_id 数据（不再依赖外部 PHP 接口）
+    请求 https://rui.soundai.ee/x.php 接口获取 x_statsig_id 数据
     """
+    url = "https://rui.soundai.ee/x.php"
+
     try:
-        # 使用自主生成方法
-        generator = XStatsigIDGenerator()
-        x_statsig_id = generator.generate_x_statsig_id()
+        # 发送GET请求
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()  # 检查HTTP状态码
 
-        logger.info("使用自主方法成功生成 x_statsig_id", "StatsigGenerator")
+        # 解析JSON响应
+        data = response.json()
 
-        # 构造与原接口兼容的返回格式
-        data = {
-            'x_statsig_id': x_statsig_id,
-            'method': 'self_generated',
-            'timestamp': int(time.time()),
-            'source': 'XStatsigIDGenerator'
-        }
+        # 提取x_statsig_id
+        x_statsig_id = data.get('x_statsig_id')
 
         return {
             'success': True,
@@ -154,53 +152,49 @@ def fetch_statsig_data():
             'x_statsig_id': x_statsig_id
         }
 
-    except Exception as e:
-        logger.error(f"自主生成 x_statsig_id 失败: {e}", "StatsigGenerator")
-
-        # 如果自主生成失败，返回一个基于 UUID 的备用值
-        fallback_id = "fallback-statsig-id-" + str(uuid.uuid4())
-
+    except requests.exceptions.RequestException as e:
         return {
-            'success': True,  # 仍然返回 success=True，因为我们提供了备用方案
-            'data': {
-                'x_statsig_id': fallback_id,
-                'method': 'fallback_uuid',
-                'timestamp': int(time.time()),
-                'source': 'UUID_fallback'
-            },
-            'x_statsig_id': fallback_id
+            'success': False,
+            'error': f'请求错误: {e}'
+        }
+    except json.JSONDecodeError as e:
+        return {
+            'success': False,
+            'error': f'JSON解析错误: {e}',
+            'raw_response': response.text if 'response' in locals() else None
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': f'未知错误: {e}'
         }
 
 def generate_statsig_id_fallback():
     """
-    备用方案：当主要生成方法失败时使用的简单 UUID 生成器
-    注意：现在 fetch_statsig_data 已经直接使用自主方法，此函数主要用于极端异常情况
+    使用自主生成方法作为备用方案生成 x_statsig_id
     """
     try:
-        # 尝试使用自主生成方法
         generator = XStatsigIDGenerator()
         x_statsig_id = generator.generate_x_statsig_id()
-        logger.info("备用方案：使用自主生成方法成功生成 x_statsig_id", "StatsigGenerator")
+        logger.info("使用自主生成方法成功生成 x_statsig_id", "StatsigGenerator")
         return x_statsig_id
     except Exception as e:
-        logger.error(f"备用方案：自主生成 x_statsig_id 失败: {e}", "StatsigGenerator")
-        # 如果自主生成也失败，返回一个基于 UUID 的默认值
-        fallback_id = "fallback-statsig-id-" + str(uuid.uuid4())
-        logger.warning(f"使用 UUID 备用方案: {fallback_id}", "StatsigGenerator")
-        return fallback_id
+        logger.error(f"自主生成 x_statsig_id 失败: {e}", "StatsigGenerator")
+        # 如果自主生成也失败，返回一个默认值
+        return "fallback-statsig-id-" + str(uuid.uuid4())
 
 def get_x_statsig_id():
     """
-    获取 x_statsig_id，现在直接使用自主生成方法（不再依赖外部接口）
+    获取 x_statsig_id，优先使用接口，失败时使用自主生成方法
     """
-    # 直接使用自主生成方法（fetch_statsig_data 现在已经是自主生成）
+    # 首先尝试从接口获取
     result = fetch_statsig_data()
 
     if result['success'] and result.get('x_statsig_id'):
-        logger.info("成功生成 x_statsig_id", "StatsigGenerator")
+        logger.info("成功从接口获取 x_statsig_id", "StatsigAPI")
         return result['x_statsig_id']
     else:
-        logger.warning(f"主要生成方法失败: {result.get('error', '未知错误')}，使用备用方案", "StatsigGenerator")
+        logger.warning(f"接口获取失败: {result.get('error', '未知错误')}，使用自主生成方法", "StatsigAPI")
         return generate_statsig_id_fallback()
 
 # 初始化 x_statsig_id（在应用启动时获取一次）
