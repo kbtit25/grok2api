@@ -1,0 +1,5 @@
+*.md
+*.txt
+*.json
+*.log
+.env

@@ -13,6 +13,7 @@ import requests
 from flask import Flask, request, Response, jsonify, stream_with_context, render_template, redirect, session
 from curl_cffi import requests as curl_requests
 from werkzeug.middleware.proxy_fix import ProxyFix
+from xStatsigIDGenerator import XStatsigIDGenerator
 
 class Logger:
     def __init__(self, level="INFO", colorize=True, format=None):
@@ -130,63 +131,116 @@ CONFIG = {
 
 def fetch_statsig_data():
     """
-    请求 https://rui.soundai.ee/x.php 接口获取 x_statsig_id 数据
+    使用自主方法生成 x_statsig_id 数据（不再依赖外部 PHP 接口）
     """
-    url = "https://rui.soundai.ee/x.php"
-    
     try:
-        # 发送GET请求
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()  # 检查HTTP状态码
-        
-        # 解析JSON响应
-        data = response.json()
-        
-        # 提取x_statsig_id
-        x_statsig_id = data.get('x_statsig_id')
-        
+        # 使用自主生成方法
+        generator = XStatsigIDGenerator()
+        x_statsig_id = generator.generate_x_statsig_id()
+
+        logger.info("使用自主方法成功生成 x_statsig_id", "StatsigGenerator")
+
+        # 构造与原接口兼容的返回格式
+        data = {
+            'x_statsig_id': x_statsig_id,
+            'method': 'self_generated',
+            'timestamp': int(time.time()),
+            'source': 'XStatsigIDGenerator'
+        }
+
         return {
             'success': True,
             'data': data,
             'x_statsig_id': x_statsig_id
         }
-        
-    except requests.exceptions.RequestException as e:
-        return {
-            'success': False,
-            'error': f'请求错误: {e}'
-        }
-    except json.JSONDecodeError as e:
-        return {
-            'success': False,
-            'error': f'JSON解析错误: {e}',
-            'raw_response': response.text if 'response' in locals() else None
-        }
+
     except Exception as e:
+        logger.error(f"自主生成 x_statsig_id 失败: {e}", "StatsigGenerator")
+
+        # 如果自主生成失败，返回一个基于 UUID 的备用值
+        fallback_id = "fallback-statsig-id-" + str(uuid.uuid4())
+
         return {
-            'success': False,
-            'error': f'未知错误: {e}'
+            'success': True,  # 仍然返回 success=True，因为我们提供了备用方案
+            'data': {
+                'x_statsig_id': fallback_id,
+                'method': 'fallback_uuid',
+                'timestamp': int(time.time()),
+                'source': 'UUID_fallback'
+            },
+            'x_statsig_id': fallback_id
         }
 
-DEFAULT_HEADERS = {
-    'Accept': '*/*',
-    'Accept-Language': 'zh-CN,zh;q=0.9',
-    'Accept-Encoding': 'gzip, deflate, br, zstd',
-    'Content-Type': 'text/plain;charset=UTF-8',
-    'Connection': 'keep-alive',
-    'Origin': 'https://grok.com',
-    'Priority': 'u=1, i',
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-    'Sec-Ch-Ua': '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
-    'Sec-Ch-Ua-Mobile': '?0',
-    'Sec-Ch-Ua-Platform': '"macOS"',
-    'Sec-Fetch-Dest': 'empty',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'same-origin',
-    'X-Statsig-Id': fetch_statsig_data()['x_statsig_id'],
-    'X-Xai-Request-Id': str(uuid.uuid4()),
-    'Baggage': 'sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c'
-}
+def generate_statsig_id_fallback():
+    """
+    备用方案：当主要生成方法失败时使用的简单 UUID 生成器
+    注意：现在 fetch_statsig_data 已经直接使用自主方法，此函数主要用于极端异常情况
+    """
+    try:
+        # 尝试使用自主生成方法
+        generator = XStatsigIDGenerator()
+        x_statsig_id = generator.generate_x_statsig_id()
+        logger.info("备用方案：使用自主生成方法成功生成 x_statsig_id", "StatsigGenerator")
+        return x_statsig_id
+    except Exception as e:
+        logger.error(f"备用方案：自主生成 x_statsig_id 失败: {e}", "StatsigGenerator")
+        # 如果自主生成也失败，返回一个基于 UUID 的默认值
+        fallback_id = "fallback-statsig-id-" + str(uuid.uuid4())
+        logger.warning(f"使用 UUID 备用方案: {fallback_id}", "StatsigGenerator")
+        return fallback_id
+
+def get_x_statsig_id():
+    """
+    获取 x_statsig_id，现在直接使用自主生成方法（不再依赖外部接口）
+    """
+    # 直接使用自主生成方法（fetch_statsig_data 现在已经是自主生成）
+    result = fetch_statsig_data()
+
+    if result['success'] and result.get('x_statsig_id'):
+        logger.info("成功生成 x_statsig_id", "StatsigGenerator")
+        return result['x_statsig_id']
+    else:
+        logger.warning(f"主要生成方法失败: {result.get('error', '未知错误')}，使用备用方案", "StatsigGenerator")
+        return generate_statsig_id_fallback()
+
+# 初始化 x_statsig_id（在应用启动时获取一次）
+_cached_x_statsig_id = None
+
+def get_cached_x_statsig_id():
+    """
+    获取缓存的 x_statsig_id，如果没有缓存则重新获取
+    """
+    global _cached_x_statsig_id
+    if _cached_x_statsig_id is None:
+        _cached_x_statsig_id = get_x_statsig_id()
+    return _cached_x_statsig_id
+
+def get_default_headers():
+    """
+    动态生成默认请求头，确保 X-Statsig-Id 总是可用
+    """
+    return {
+        'Accept': '*/*',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br, zstd',
+        'Content-Type': 'text/plain;charset=UTF-8',
+        'Connection': 'keep-alive',
+        'Origin': 'https://grok.com',
+        'Priority': 'u=1, i',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+        'Sec-Ch-Ua': '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"macOS"',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+        'X-Statsig-Id': get_cached_x_statsig_id(),
+        'X-Xai-Request-Id': str(uuid.uuid4()),
+        'Baggage': 'sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c'
+    }
+
+# 为了向后兼容，保留 DEFAULT_HEADERS 变量
+DEFAULT_HEADERS = get_default_headers()
 
 class AuthTokenManager:
     def __init__(self):
@@ -587,7 +641,7 @@ class GrokApiClient:
             response = curl_requests.post(
                 "https://grok.com/rest/app-chat/upload-file",
                 headers={
-                    **DEFAULT_HEADERS,
+                    **get_default_headers(),
                     "Cookie":cookie
                 },
                 json=upload_data,
@@ -632,7 +686,7 @@ class GrokApiClient:
             response = curl_requests.post(
                 url,
                 headers={
-                    **DEFAULT_HEADERS,
+                    **get_default_headers(),
                     "Cookie":CONFIG["SERVER"]['COOKIE']
                 },
                 json=upload_data,
@@ -891,7 +945,7 @@ def handle_image_response(image_url):
             image_base64_response = curl_requests.get(
                 f"https://assets.grok.com/{image_url}",
                 headers={
-                    **DEFAULT_HEADERS,
+                    **get_default_headers(),
                     "Cookie":CONFIG["SERVER"]['COOKIE']
                 },
                 impersonate="chrome133a",
@@ -1266,7 +1320,7 @@ def chat_completions():
                 response = curl_requests.post(
                     f"{CONFIG['API']['BASE_URL']}/rest/app-chat/conversations/new",
                     headers={
-                        **DEFAULT_HEADERS, 
+                        **get_default_headers(),
                         "Cookie":CONFIG["SERVER"]['COOKIE']
                     },
                     data=json.dumps(request_payload),
