@@ -1,6 +1,27 @@
 
 # grok2API 接入指南：基于 python 的实现
 
+## 写了一点自己的东西
+1.最好直接用docker运行，简单方便，我也写好了对应的脚本，有需要可以自己更改参数
+### 克隆项目
+```bash
+git clone https://github.com/liuw1535/cursor-to-openai-nexus.git
+```
+### 进入项目
+```bash
+cd cursor-to-openai-nexus
+```
+### 创建配置文件
+```bash
+#复制后一定要根据自己的实际情况修改.env，里面对应的参数请参考原项目的文档
+cp .env.example .env
+```
+### 运行docker脚本
+```bash
+bash ./rebuild.sh
+```
+### 最后根据自己的实际情况使用api或管理token
+
 ## 项目简介
 本项目提供了一种简单、高效的方式通过 Docker 部署 使用openAI的格式转换调用grok官网，进行api处理。
 
