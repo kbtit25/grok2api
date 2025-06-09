@@ -1,5 +1,21 @@
-*.md
-*.txt
-*.json
-*.log
+# 忽略敏感配置文件
 .env
+*.log
+
+# 忽略临时文件
+*.tmp
+*.temp
+
+# 保留重要文档和测试文件
+# *.md - 允许文档文件
+# *.txt - 允许文本文件
+# test_*.py - 允许测试文件
+
+# 忽略特定的数据文件（但保留结构）
+data/*.json
+!data/.gitkeep
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo

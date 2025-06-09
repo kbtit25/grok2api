@@ -183,36 +183,123 @@ def generate_statsig_id_fallback():
         # 如果自主生成也失败，返回一个默认值
         return "fallback-statsig-id-" + str(uuid.uuid4())
 
+def get_x_statsig_id_primary():
+    """
+    主要策略：优先使用自主生成方法生成 x_statsig_id
+    """
+    try:
+        logger.info("使用主要策略：自主生成 x_statsig_id", "StatsigGenerator")
+        generator = XStatsigIDGenerator()
+        x_statsig_id = generator.generate_x_statsig_id()
+        logger.info("主要策略成功：自主生成 x_statsig_id 完成", "StatsigGenerator")
+        return {
+            'success': True,
+            'x_statsig_id': x_statsig_id,
+            'method': 'self_generated'
+        }
+    except Exception as e:
+        logger.error(f"主要策略失败：自主生成 x_statsig_id 错误: {e}", "StatsigGenerator")
+        return {
+            'success': False,
+            'error': str(e),
+            'method': 'self_generated'
+        }
+
+def get_x_statsig_id_fallback():
+    """
+    备用策略：使用 PHP 接口获取 x_statsig_id
+    """
+    try:
+        logger.info("使用备用策略：PHP 接口获取 x_statsig_id", "StatsigAPI")
+        result = fetch_statsig_data()
+
+        if result['success'] and result.get('x_statsig_id'):
+            logger.info("备用策略成功：从 PHP 接口获取 x_statsig_id", "StatsigAPI")
+            return {
+                'success': True,
+                'x_statsig_id': result['x_statsig_id'],
+                'method': 'php_interface'
+            }
+        else:
+            logger.error(f"备用策略失败：PHP 接口错误: {result.get('error', '未知错误')}", "StatsigAPI")
+            return {
+                'success': False,
+                'error': result.get('error', '未知错误'),
+                'method': 'php_interface'
+            }
+    except Exception as e:
+        logger.error(f"备用策略异常：{e}", "StatsigAPI")
+        return {
+            'success': False,
+            'error': str(e),
+            'method': 'php_interface'
+        }
+
 def get_x_statsig_id():
     """
-    获取 x_statsig_id，优先使用接口，失败时使用自主生成方法
+    获取 x_statsig_id，优先使用自主生成方法，失败时使用 PHP 接口
     """
-    # 首先尝试从接口获取
-    result = fetch_statsig_data()
+    # 主要策略：自主生成
+    primary_result = get_x_statsig_id_primary()
 
-    if result['success'] and result.get('x_statsig_id'):
-        logger.info("成功从接口获取 x_statsig_id", "StatsigAPI")
-        return result['x_statsig_id']
-    else:
-        logger.warning(f"接口获取失败: {result.get('error', '未知错误')}，使用自主生成方法", "StatsigAPI")
-        return generate_statsig_id_fallback()
+    if primary_result['success']:
+        return primary_result['x_statsig_id']
+
+    # 备用策略：PHP 接口
+    logger.warning("主要策略失败，切换到备用策略", "StatsigStrategy")
+    fallback_result = get_x_statsig_id_fallback()
+
+    if fallback_result['success']:
+        return fallback_result['x_statsig_id']
+
+    # 所有策略都失败，返回默认值
+    logger.error("所有策略都失败，使用默认 x_statsig_id", "StatsigStrategy")
+    return "fallback-statsig-id-" + str(uuid.uuid4())
 
 # 初始化 x_statsig_id（在应用启动时获取一次）
 _cached_x_statsig_id = None
+_cached_x_statsig_id_method = None
 
 def get_cached_x_statsig_id():
     """
     获取缓存的 x_statsig_id，如果没有缓存则重新获取
     """
-    global _cached_x_statsig_id
+    global _cached_x_statsig_id, _cached_x_statsig_id_method
     if _cached_x_statsig_id is None:
         _cached_x_statsig_id = get_x_statsig_id()
+        _cached_x_statsig_id_method = 'initial'
     return _cached_x_statsig_id
 
-def get_default_headers():
+def refresh_x_statsig_id_with_fallback():
+    """
+    强制刷新 x_statsig_id，使用备用策略（PHP 接口）
+    """
+    global _cached_x_statsig_id, _cached_x_statsig_id_method
+
+    logger.info("强制刷新 x_statsig_id，使用备用策略", "StatsigStrategy")
+    fallback_result = get_x_statsig_id_fallback()
+
+    if fallback_result['success']:
+        _cached_x_statsig_id = fallback_result['x_statsig_id']
+        _cached_x_statsig_id_method = 'php_interface'
+        logger.info("成功使用备用策略刷新 x_statsig_id", "StatsigStrategy")
+        return _cached_x_statsig_id
+    else:
+        logger.error("备用策略也失败，保持原有 x_statsig_id", "StatsigStrategy")
+        return _cached_x_statsig_id
+
+def get_default_headers(force_refresh_statsig=False):
     """
     动态生成默认请求头，确保 X-Statsig-Id 总是可用
+
+    Args:
+        force_refresh_statsig: 是否强制刷新 x_statsig_id（使用备用策略）
     """
+    if force_refresh_statsig:
+        statsig_id = refresh_x_statsig_id_with_fallback()
+    else:
+        statsig_id = get_cached_x_statsig_id()
+
     return {
         'Accept': '*/*',
         'Accept-Language': 'zh-CN,zh;q=0.9',
@@ -228,7 +315,7 @@ def get_default_headers():
         'Sec-Fetch-Dest': 'empty',
         'Sec-Fetch-Mode': 'cors',
         'Sec-Fetch-Site': 'same-origin',
-        'X-Statsig-Id': get_cached_x_statsig_id(),
+        'X-Statsig-Id': statsig_id,
         'X-Xai-Request-Id': str(uuid.uuid4()),
         'Baggage': 'sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c'
     }
@@ -551,6 +638,73 @@ class AuthTokenManager:
     def get_token_status_map(self):
         return self.token_status_map
 
+def smart_grok_request_with_fallback(request_func, *args, **kwargs):
+    """
+    智能 Grok API 请求函数，支持 x_statsig_id 降级重试机制
+
+    Args:
+        request_func: 要执行的请求函数
+        *args: 请求函数的位置参数
+        **kwargs: 请求函数的关键字参数
+
+    Returns:
+        请求结果
+    """
+    max_retries = 2  # 最多重试2次（主要策略1次 + 备用策略1次）
+
+    for attempt in range(max_retries):
+        try:
+            # 第一次尝试使用当前的 x_statsig_id（可能是自主生成的）
+            if attempt == 0:
+                logger.info("使用主要策略发起 Grok API 请求", "SmartRequest")
+                response = request_func(*args, **kwargs)
+            else:
+                # 第二次尝试：强制使用备用策略（PHP 接口）刷新 x_statsig_id
+                logger.warning("主要策略失败，使用备用策略重新发起 Grok API 请求", "SmartRequest")
+
+                # 更新 kwargs 中的 headers，强制刷新 x_statsig_id
+                if 'headers' in kwargs:
+                    kwargs['headers'].update(get_default_headers(force_refresh_statsig=True))
+                else:
+                    kwargs['headers'] = get_default_headers(force_refresh_statsig=True)
+
+                response = request_func(*args, **kwargs)
+
+            # 检查响应状态码
+            if hasattr(response, 'status_code'):
+                status_code = response.status_code
+
+                # 如果是成功状态码，直接返回
+                if 200 <= status_code < 300:
+                    if attempt > 0:
+                        logger.info(f"备用策略成功：Grok API 请求成功 (状态码: {status_code})", "SmartRequest")
+                    else:
+                        logger.info(f"主要策略成功：Grok API 请求成功 (状态码: {status_code})", "SmartRequest")
+                    return response
+
+                # 如果是 4xx 或 5xx 错误，且还有重试机会，继续重试
+                elif (400 <= status_code < 600) and attempt < max_retries - 1:
+                    logger.warning(f"Grok API 请求失败 (状态码: {status_code})，尝试使用备用策略", "SmartRequest")
+                    continue
+                else:
+                    # 最后一次重试也失败了
+                    logger.error(f"所有策略都失败：Grok API 请求失败 (状态码: {status_code})", "SmartRequest")
+                    return response
+            else:
+                # 没有 status_code 属性，直接返回响应
+                return response
+
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"Grok API 请求异常: {e}，尝试使用备用策略", "SmartRequest")
+                continue
+            else:
+                logger.error(f"所有策略都失败：Grok API 请求异常: {e}", "SmartRequest")
+                raise
+
+    # 理论上不会到达这里
+    return None
+
 class Utils:
     @staticmethod
     def organize_search_results(search_results):
@@ -630,16 +784,24 @@ class GrokApiClient:
             }
 
             logger.info("发送文字文件请求", "Server")
-            cookie = f"{Utils.create_auth_headers(model, True)};{CONFIG['SERVER']['CF_CLEARANCE']}" 
+            cookie = f"{Utils.create_auth_headers(model, True)};{CONFIG['SERVER']['CF_CLEARANCE']}"
             proxy_options = Utils.get_proxy_options()
-            response = curl_requests.post(
-                "https://grok.com/rest/app-chat/upload-file",
+
+            # 使用智能重试机制发起文件上传请求
+            def make_upload_request(**request_kwargs):
+                return curl_requests.post(
+                    "https://grok.com/rest/app-chat/upload-file",
+                    json=upload_data,
+                    impersonate="chrome133a",
+                    **request_kwargs
+                )
+
+            response = smart_grok_request_with_fallback(
+                make_upload_request,
                 headers={
                     **get_default_headers(),
-                    "Cookie":cookie
+                    "Cookie": cookie
                 },
-                json=upload_data,
-                impersonate="chrome133a",
                 **proxy_options
             )
 
@@ -677,14 +839,22 @@ class GrokApiClient:
             logger.info("发送图片请求", "Server")
 
             proxy_options = Utils.get_proxy_options()
-            response = curl_requests.post(
-                url,
+
+            # 使用智能重试机制发起图片上传请求
+            def make_image_upload_request(**request_kwargs):
+                return curl_requests.post(
+                    url,
+                    json=upload_data,
+                    impersonate="chrome133a",
+                    **request_kwargs
+                )
+
+            response = smart_grok_request_with_fallback(
+                make_image_upload_request,
                 headers={
                     **get_default_headers(),
-                    "Cookie":CONFIG["SERVER"]['COOKIE']
+                    "Cookie": CONFIG["SERVER"]['COOKIE']
                 },
-                json=upload_data,
-                impersonate="chrome133a",
                 **proxy_options
             )
 
@@ -936,13 +1106,21 @@ def handle_image_response(image_url):
     while retry_count < max_retries:
         try:
             proxy_options = Utils.get_proxy_options()
-            image_base64_response = curl_requests.get(
-                f"https://assets.grok.com/{image_url}",
+
+            # 使用智能重试机制发起图片下载请求
+            def make_image_download_request(**request_kwargs):
+                return curl_requests.get(
+                    f"https://assets.grok.com/{image_url}",
+                    impersonate="chrome133a",
+                    **request_kwargs
+                )
+
+            image_base64_response = smart_grok_request_with_fallback(
+                make_image_download_request,
                 headers={
                     **get_default_headers(),
-                    "Cookie":CONFIG["SERVER"]['COOKIE']
+                    "Cookie": CONFIG["SERVER"]['COOKIE']
                 },
-                impersonate="chrome133a",
                 **proxy_options
             )
 
@@ -1311,16 +1489,25 @@ def chat_completions():
             logger.info(json.dumps(request_payload,indent=2),"Server")
             try:
                 proxy_options = Utils.get_proxy_options()
-                response = curl_requests.post(
-                    f"{CONFIG['API']['BASE_URL']}/rest/app-chat/conversations/new",
+
+                # 使用智能重试机制发起请求
+                def make_grok_request(**request_kwargs):
+                    return curl_requests.post(
+                        f"{CONFIG['API']['BASE_URL']}/rest/app-chat/conversations/new",
+                        data=json.dumps(request_payload),
+                        impersonate="chrome133a",
+                        stream=True,
+                        **request_kwargs
+                    )
+
+                response = smart_grok_request_with_fallback(
+                    make_grok_request,
                     headers={
                         **get_default_headers(),
-                        "Cookie":CONFIG["SERVER"]['COOKIE']
+                        "Cookie": CONFIG["SERVER"]['COOKIE']
                     },
-                    data=json.dumps(request_payload),
-                    impersonate="chrome133a",
-                    stream=True,
-                    **proxy_options)
+                    **proxy_options
+                )
                 logger.info(CONFIG["SERVER"]['COOKIE'],"Server")
                 if response.status_code == 200:
                     response_status_code = 200
