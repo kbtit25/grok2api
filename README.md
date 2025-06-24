@@ -5,11 +5,11 @@
 1.最好直接用docker运行，简单方便，我也写好了对应的脚本，有需要可以自己更改参数
 ### 克隆项目
 ```bash
-git clone https://github.com/liuw1535/cursor-to-openai-nexus.git
+git clone https://github.com/kbtit/grok2api.git
 ```
 ### 进入项目
 ```bash
-cd cursor-to-openai-nexus
+cd grok2api
 ```
 ### 创建配置文件
 ```bash
