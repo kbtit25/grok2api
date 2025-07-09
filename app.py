@@ -1033,6 +1033,58 @@ class GrokApiClient:
             "disableTextFollowUps": True
         }
 
+# ==============================================================================
+# =================== 新的、简单粗暴但极其有效的流式处理函数 ===================
+# ==============================================================================
+def generate_openai_stream(grok_response, model_name):
+    """
+    接收来自 Grok API 的原生响应流，并以一种简单、健壮的方式
+    将其转换为标准的 OpenAI SSE 格式。
+    """
+    logger.info("开始使用[简单粗暴版]流式处理函数 generate_openai_stream", "StreamHandler")
+    
+    try:
+        for line in grok_response.iter_lines():
+            if not line:
+                continue
+
+            try:
+                # 1. 解析 Grok 的原生 JSON
+                raw_chunk = json.loads(line.decode("utf-8").strip())
+                response_data = raw_chunk.get("result", {}).get("response", {})
+                if not response_data:
+                    continue
+
+                message_tag = response_data.get("messageTag")
+                token = response_data.get("token")
+
+                # 2. 规则一：是心跳吗？是就 Ping，然后处理下一个。
+                if message_tag == 'heartbeat':
+                    yield ":ping\n\n"
+                    continue
+
+                # 3. 规则二：有文本内容吗？有就直接发，不管内容是什么。
+                if token and isinstance(token, str):
+                    openai_chunk = MessageProcessor.create_chat_response(token, model_name, is_stream=True)
+                    yield f"data: {json.dumps(openai_chunk)}\n\n"
+
+                # 4. 规则三：是结束信号吗？是就结束循环。
+                if message_tag == 'final':
+                    logger.info("收到 final 标志，准备结束流", "StreamHandler")
+                    break # 跳出 for 循环
+
+            except json.JSONDecodeError:
+                logger.warning(f"无法解析的行，已忽略: {line}", "StreamHandler")
+                continue
+            except Exception as e:
+                logger.error(f"处理流中单个块时出错，已忽略: {e}", "StreamHandler")
+                continue
+
+    finally:
+        # 5. 规则四：无论如何，最后都要发送 [DONE]
+        logger.info("发送 [DONE] 结束标志", "StreamHandler")
+        yield "data: [DONE]\n\n"
+
 class MessageProcessor:
     @staticmethod
     def create_chat_response(message, model, is_stream=False):
@@ -1504,10 +1556,10 @@ def chat_completions():
             else:
                 CONFIG["SERVER"]['COOKIE'] = CONFIG['API']['SIGNATURE_COOKIE']
             logger.info(json.dumps(request_payload,indent=2),"Server")
+            
             try:
                 proxy_options = Utils.get_proxy_options()
 
-                # 使用智能重试机制发起请求
                 def make_grok_request(**request_kwargs):
                     return curl_requests.post(
                         f"{CONFIG['API']['BASE_URL']}/rest/app-chat/conversations/new",
@@ -1526,36 +1578,61 @@ def chat_completions():
                     **proxy_options
                 )
                 logger.info(CONFIG["SERVER"]['COOKIE'],"Server")
+
                 if response.status_code == 200:
                     response_status_code = 200
                     logger.info("请求成功", "Server")
                     logger.info(f"当前{model}剩余可用令牌数: {token_manager.get_token_count_for_model(model)}","Server")
 
+                    # ==========================================================
+                    # ==================== 这是核心修改区域 ====================
+                    # ==========================================================
                     try:
+                        # 无论是否流式，都统一使用新的、健壮的生成器函数
+                        # 注意我们将客户端请求的原始模型名称 `data.get("model")` 传递进去用于智能分流
+                        stream_generator = generate_openai_stream(response, data.get("model"))
+
                         if stream:
-                            return Response(stream_with_context(
-                                handle_stream_response(response, model)),content_type='text/event-stream')
+                            # 流式请求：直接返回生成器
+                            return Response(stream_with_context(stream_generator), content_type='text/event-stream')
                         else:
-                            content = handle_non_stream_response(response, model)
-                            return jsonify(
-                                MessageProcessor.create_chat_response(content, model))
+                            # 非流式请求：聚合生成器的所有内容再返回
+                            full_content = ""
+                            for sse_chunk in stream_generator:
+                                if sse_chunk.startswith("data:"):
+                                    data_str = sse_chunk[len("data:"):].strip()
+                                    if data_str != "[DONE]":
+                                        try:
+                                            chunk_json = json.loads(data_str)
+                                            delta_content = chunk_json.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                            if delta_content:
+                                                full_content += delta_content
+                                        except json.JSONDecodeError:
+                                            pass
+                            return jsonify(MessageProcessor.create_chat_response(full_content, model))
 
                     except Exception as error:
-                        logger.error(str(error), "Server")
+                        logger.error(f"在处理响应流时发生错误: {str(error)}", "Server")
+                        # 即使在流处理中出错，也要正确处理令牌
                         if CONFIG["API"]["IS_CUSTOM_SSO"]:
-                            raise ValueError(f"自定义SSO令牌当前模型{model}的请求次数已失效")
+                            raise ValueError(f"自定义SSO令牌在模型 {model} 的请求中出错")
                         token_manager.remove_token_from_model(model, CONFIG["API"]["SIGNATURE_COOKIE"])
                         if token_manager.get_token_count_for_model(model) == 0:
                             raise ValueError(f"{model} 次数已达上限，请切换其他模型或者重新对话")
+                        # 出错后，应该跳出内部的 try，让外层的 while 循环决定是否重试
+                        raise error # 重新抛出异常，让外层捕获
+                    # ==========================================================
+                    # ==================== 核心修改区域结束 ====================
+                    # ==========================================================
+
                 elif response.status_code == 403:
                     response_status_code = 403
-                    token_manager.reduce_token_request_count(model,1)#重置去除当前因为错误未成功请求的次数，确保不会因为错误未成功请求的次数导致次数上限
+                    token_manager.reduce_token_request_count(model,1)
                     if token_manager.get_token_count_for_model(model) == 0:
                         raise ValueError(f"{model} 次数已达上限，请切换其他模型或者重新对话")
-                    print("状态码:", response.status_code)
-                    print("响应头:", response.headers)
-                    print("响应内容:", response.text)
+                    logger.error(f"IP暂时被封(403)。响应头: {response.headers}, 响应内容: {response.text}")
                     raise ValueError(f"IP暂时被封无法破盾，请稍后重试或者更换ip")
+                
                 elif response.status_code == 429:
                     response_status_code = 429
                     token_manager.reduce_token_request_count(model,1)
@@ -1566,6 +1643,8 @@ def chat_completions():
                         model, CONFIG["API"]["SIGNATURE_COOKIE"])
                     if token_manager.get_token_count_for_model(model) == 0:
                         raise ValueError(f"{model} 次数已达上限，请切换其他模型或者重新对话")
+                    # 对于 429，应该立即重试
+                    continue
 
                 else:
                     if CONFIG["API"]["IS_CUSTOM_SSO"]:
@@ -1576,25 +1655,32 @@ def chat_completions():
                     logger.info(
                         f"当前{model}剩余可用令牌数: {token_manager.get_token_count_for_model(model)}",
                         "Server")
+                    # 对于其他未知错误，也进行重试
+                    continue
 
             except Exception as e:
                 logger.error(f"请求处理异常: {str(e)}", "Server")
                 if CONFIG["API"]["IS_CUSTOM_SSO"]:
                     raise
                 continue
+        
+        # 如果循环结束都没有成功返回，说明所有重试都失败了
         if response_status_code == 403:
             raise ValueError('IP暂时被封无法破盾，请稍后重试或者更换ip')
-        elif response_status_code == 500:
-            raise ValueError('当前模型所有令牌暂无可用，请稍后重试')    
+        else:
+            raise ValueError('当前模型所有令牌暂无可用或请求失败，请稍后重试')
 
     except Exception as error:
         logger.error(str(error), "ChatAPI")
+        # 确保 response_status_code 在出错时有一个合理的值
+        if response_status_code not in [401, 403, 429]:
+            response_status_code = 500
         return jsonify(
             {"error": {
                 "message": str(error),
                 "type": "server_error"
             }}), response_status_code
-
+            
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def catch_all(path):
