@@ -13,8 +13,7 @@ cd grok2api
 ```
 ### 创建配置文件
 ```bash
-#复制后一定要根据自己的实际情况修改.env，里面对应的参数请参考原项目的文档
-cp .env.example .env
+#修改.env，(根据原项目大佬说的写).env
 ```
 ### 运行docker脚本
 ```bash
