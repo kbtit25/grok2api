@@ -203,22 +203,10 @@
                         <span class="overview-value" id="totalTokens">0</span>
                     </div>
                 </div>
-                <div class="overview-card" data-tooltip="grok-2 模型剩余可用次数">
-                    <div class="overview-icon">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M12 2v20M2 12h20"/>
-                        </svg>
-                    </div>
-                    <div class="overview-content">
-                        <span class="overview-label">grok-2</span>
-                        <span class="overview-value" id="grok-2-count">0</span>
-                    </div>
-                </div>
                 <div class="overview-card" data-tooltip="grok-3 模型剩余可用次数">
                     <div class="overview-icon">
                         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <circle cx="12" cy="12" r="10"/>
-                            <path d="M12 2v4M12 18v4"/>
+                            <path d="M12 2v20M2 12h20"/>
                         </svg>
                     </div>
                     <div class="overview-content">
@@ -226,19 +214,19 @@
                         <span class="overview-value" id="grok-3-count">0</span>
                     </div>
                 </div>
-                <div class="overview-card" data-tooltip="grok-3-deepsearch 模型剩余可用次数">
+                <div class="overview-card" data-tooltip="grok-4 模型剩余可用次数">
                     <div class="overview-icon">
                         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <circle cx="11" cy="11" r="8"/>
-                            <path d="M21 21l-4.35-4.35"/>
+                            <circle cx="12" cy="12" r="10"/>
+                            <path d="M12 2v4M12 18v4"/>
                         </svg>
                     </div>
                     <div class="overview-content">
-                        <span class="overview-label">grok-3-deepsearch</span>
-                        <span class="overview-value" id="grok-3-deepsearch-count">0</span>
+                        <span class="overview-label">grok-4</span>
+                        <span class="overview-value" id="grok-4-count">0</span>
                     </div>
                 </div>
-                <div class="overview-card" data-tooltip="grok-3-deepersearch 模型剩余可用次数">
+                <div class="overview-card" data-tooltip="grok-4-deepsearch 模型剩余可用次数">
                     <div class="overview-icon">
                         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <circle cx="11" cy="11" r="8"/>
@@ -246,19 +234,31 @@
                         </svg>
                     </div>
                     <div class="overview-content">
-                        <span class="overview-label">grok-3-deepersearch</span>
-                        <span class="overview-value" id="grok-3-deepersearch-count">0</span>
+                        <span class="overview-label">grok-4-deepsearch</span>
+                        <span class="overview-value" id="grok-4-deepsearch-count">0</span>
+                    </div>
+                </div>
+                <div class="overview-card" data-tooltip="grok-4-deepersearch 模型剩余可用次数">
+                    <div class="overview-icon">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8"/>
+                            <path d="M21 21l-4.35-4.35"/>
+                        </svg>
+                    </div>
+                    <div class="overview-content">
+                        <span class="overview-label">grok-4-deepersearch</span>
+                        <span class="overview-value" id="grok-4-deepersearch-count">0</span>
                     </div>
                 </div>                
-                <div class="overview-card" data-tooltip="grok-3-reasoning 模型剩余可用次数">
+                <div class="overview-card" data-tooltip="grok-4-reasoning 模型剩余可用次数">
                     <div class="overview-icon">
                         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M12 2a10 10 0 0 0-10 10c0 5 8 13 10 13s10-8 10-13a10 10 0 0 0-10-10z"/>
                         </svg>
                     </div>
                     <div class="overview-content">
-                        <span class="overview-label">grok-3-reasoning</span>
-                        <span class="overview-value" id="grok-3-reasoning-count">0</span>
+                        <span class="overview-label">grok-4-reasoning</span>
+                        <span class="overview-value" id="grok-4-reasoning-count">0</span>
                     </div>
                 </div>
             </div>
@@ -292,10 +292,10 @@
                     <h4 style="margin-bottom: 0.75rem;">检测模型可用性</h4>
                     <div class="input-group">
                         <select class="input-field" id="modelSelect" style="width: 150px;" aria-label="选择要检测的模型">
-                            <option value="grok-2">grok-2</option>
-                            <option value="grok-3" selected>grok-3</option>
-                            <option value="grok-3-reasoning">grok-3-reasoning</option>
-                            <option value="grok-3-deepsearch">grok-3-deepsearch</option>
+                            <option value="grok-3">grok-3</option>
+                            <option value="grok-4" selected>grok-4</option>
+                            <option value="grok-4-reasoning">grok-4-reasoning</option>
+                            <option value="grok-4-deepsearch">grok-4-deepsearch</option>
                         </select>
                         <button class="btn btn-base" id="testAvailabilityBtn" aria-label="检测模型可用性">检测</button>
                     </div>
@@ -341,11 +341,11 @@
 
     <script>
         const modelConfig = {
-            "grok-2": { RequestFrequency: 30, ExpirationTime: 3600000 },
-            "grok-3": { RequestFrequency: 100, ExpirationTime: 7200000 },
-            "grok-3-deepsearch": { RequestFrequency: 30, ExpirationTime: 86400000 },
-            "grok-3-deepersearch": { RequestFrequency: 10, ExpirationTime: 86400000 },
-            "grok-3-reasoning": { RequestFrequency: 30, ExpirationTime: 86400000 }
+            "grok-3": { RequestFrequency: 30, ExpirationTime: 3600000 },
+            "grok-4": { RequestFrequency: 100, ExpirationTime: 7200000 },
+            "grok-4-deepsearch": { RequestFrequency: 30, ExpirationTime: 86400000 },
+            "grok-4-deepersearch": { RequestFrequency: 10, ExpirationTime: 86400000 },
+            "grok-4-reasoning": { RequestFrequency: 30, ExpirationTime: 86400000 }
         };
 
         let tokenMap = {};
@@ -385,7 +385,7 @@
             }
 
             const modelRemaining = calculateModelRemaining();
-            const modelIds = ['grok-2', 'grok-3', 'grok-3-deepsearch', 'grok-3-deepersearch', 'grok-3-reasoning'];
+            const modelIds = ['grok-3', 'grok-4', 'grok-4-deepsearch', 'grok-4-deepersearch', 'grok-4-reasoning'];
             modelIds.forEach(modelName => {
                 const countElement = document.getElementById(`${modelName}-count`);
                 if (countElement) {
