@@ -142,15 +142,15 @@ if not DATA_DIR.exists():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG = {
     "MODELS": {
-        'grok-2': 'grok-latest',
-        'grok-2-imageGen': 'grok-latest',
-        'grok-2-search': 'grok-latest',
-        "grok-3": "grok-3",
-        "grok-3-search": "grok-3",
-        "grok-3-imageGen": "grok-3",
-        "grok-3-deepsearch": "grok-3",
-        "grok-3-deepersearch": "grok-3",
-        "grok-3-reasoning": "grok-3"
+        'grok-3': 'grok-3',
+        'grok-3-imageGen': 'grok-3',
+        'grok-3-search': 'grok-3',
+        "grok-4": "grok-4",
+        "grok-4-search": "grok-4",
+        "grok-4-imageGen": "grok-4",
+        "grok-4-deepsearch": "grok-4",
+        "grok-4-deepersearch": "grok-4",
+        "grok-4-reasoning": "grok-4"
     },
     "API": {
         "IS_TEMP_CONVERSATION": os.environ.get("IS_TEMP_CONVERSATION", "true").lower() == "true",
@@ -347,23 +347,23 @@ class AuthTokenManager:
         self.token_status_map = {}
 
         self.model_config = {
-            "grok-2": {
-                "RequestFrequency": 30,
-                "ExpirationTime": 1 * 60 * 60 * 1000  # 1小时
-            },
             "grok-3": {
+                "RequestFrequency": 100,
+                "ExpirationTime": 2 * 60 * 60 * 1000  # 1小时
+            },
+            "grok-4": {
                 "RequestFrequency": 100,
                 "ExpirationTime": 2 * 60 * 60 * 1000  # 2小时
             },
-            "grok-3-deepsearch": {
+            "grok-4-deepsearch": {
                 "RequestFrequency": 30,
                 "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
             },
-            "grok-3-deepersearch": {
+            "grok-4-deepersearch": {
                 "RequestFrequency": 10,
                 "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
             },
-            "grok-3-reasoning": {
+            "grok-4-reasoning": {
                 "RequestFrequency": 30,
                 "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
             }
@@ -736,7 +736,7 @@ class Utils:
             url = result.get('url', '#')
             preview = result.get('preview', '无预览内容')
 
-            formatted_result = f"\r\n<details><summary>资料[{index}]: {title}</summary>\r\n{preview}\r\n\n[Link]({url})\r\n</details>"
+            formatted_result = f"\r\n<details><summary>资料[{index}]: {title}</summary>\r\n{preview}\r\n\n[{title}]({url})\r\n</details>\n"
             formatted_results.append(formatted_result)
 
         return '\n\n'.join(formatted_results)
@@ -907,14 +907,14 @@ class GrokApiClient:
     #         logger.error(str(error), "Server")
     #         raise ValueError(error)
     def prepare_chat_request(self, request):
-        if ((request["model"] == 'grok-2-imageGen' or request["model"] == 'grok-3-imageGen') and
+        if ((request["model"] == 'grok-3-imageGen' or request["model"] == 'grok-4-imageGen') and
             not CONFIG["API"]["PICGO_KEY"] and not CONFIG["API"]["TUMY_KEY"] and
             request.get("stream", False)):
             raise ValueError("该模型流式输出需要配置PICGO或者TUMY图床密钥!")
 
         # system_message, todo_messages = self.convert_system_messages(request["messages"]).values()
         todo_messages = request["messages"]
-        if request["model"] in ['grok-2-imageGen', 'grok-3-imageGen', 'grok-3-deepsearch']:
+        if request["model"] in ['grok-3-imageGen', 'grok-4-imageGen', 'grok-4-deepsearch']:
             last_message = todo_messages[-1]
             if last_message["role"] != 'user':
                 raise ValueError('此模型最后一条消息必须是用户消息!')
@@ -926,11 +926,11 @@ class GrokApiClient:
         message_length = 0
         convert_to_file = False
         last_message_content = ''
-        search = request["model"] in ['grok-2-search', 'grok-3-search']
+        search = request["model"] in ['grok-3-search', 'grok-4-search']
         deepsearchPreset = ''
-        if request["model"] == 'grok-3-deepsearch':
+        if request["model"] == 'grok-4-deepsearch':
             deepsearchPreset = 'default'
-        elif request["model"] == 'grok-3-deepersearch':
+        elif request["model"] == 'grok-4-deepersearch':
             deepsearchPreset = 'deeper'
 
         # 移除<think>标签及其内容和base64图片
@@ -1018,7 +1018,7 @@ class GrokApiClient:
             "imageGenerationCount": 1,
             "forceConcise": False,
             "toolOverrides": {
-                "imageGen": request["model"] in ['grok-2-imageGen', 'grok-3-imageGen'],
+                "imageGen": request["model"] in ['grok-3-imageGen', 'grok-4-imageGen'],
                 "webSearch": search,
                 "xSearch": search,
                 "xMediaSearch": search,
@@ -1029,61 +1029,9 @@ class GrokApiClient:
             "sendFinalMetadata": True,
             "customPersonality": "",
             "deepsearchPreset": deepsearchPreset,
-            "isReasoning": request["model"] == 'grok-3-reasoning',
+            "isReasoning": request["model"] == 'grok-4-reasoning',
             "disableTextFollowUps": True
         }
-
-# ==============================================================================
-# =================== 新的、简单粗暴但极其有效的流式处理函数 ===================
-# ==============================================================================
-def generate_openai_stream(grok_response, model_name):
-    """
-    接收来自 Grok API 的原生响应流，并以一种简单、健壮的方式
-    将其转换为标准的 OpenAI SSE 格式。
-    """
-    logger.info("开始使用[简单粗暴版]流式处理函数 generate_openai_stream", "StreamHandler")
-    
-    try:
-        for line in grok_response.iter_lines():
-            if not line:
-                continue
-
-            try:
-                # 1. 解析 Grok 的原生 JSON
-                raw_chunk = json.loads(line.decode("utf-8").strip())
-                response_data = raw_chunk.get("result", {}).get("response", {})
-                if not response_data:
-                    continue
-
-                message_tag = response_data.get("messageTag")
-                token = response_data.get("token")
-
-                # 2. 规则一：是心跳吗？是就 Ping，然后处理下一个。
-                if message_tag == 'heartbeat':
-                    yield ":ping\n\n"
-                    continue
-
-                # 3. 规则二：有文本内容吗？有就直接发，不管内容是什么。
-                if token and isinstance(token, str):
-                    openai_chunk = MessageProcessor.create_chat_response(token, model_name, is_stream=True)
-                    yield f"data: {json.dumps(openai_chunk)}\n\n"
-
-                # 4. 规则三：是结束信号吗？是就结束循环。
-                if message_tag == 'final':
-                    logger.info("收到 final 标志，准备结束流", "StreamHandler")
-                    break # 跳出 for 循环
-
-            except json.JSONDecodeError:
-                logger.warning(f"无法解析的行，已忽略: {line}", "StreamHandler")
-                continue
-            except Exception as e:
-                logger.error(f"处理流中单个块时出错，已忽略: {e}", "StreamHandler")
-                continue
-
-    finally:
-        # 5. 规则四：无论如何，最后都要发送 [DONE]
-        logger.info("发送 [DONE] 结束标志", "StreamHandler")
-        yield "data: [DONE]\n\n"
 
 class MessageProcessor:
     @staticmethod
@@ -1120,6 +1068,7 @@ class MessageProcessor:
             "usage": None
         }
 
+
 def process_model_response(response, model):
     result = {"token": None, "imageUrl": None}
 
@@ -1127,46 +1076,47 @@ def process_model_response(response, model):
         if response.get("cachedImageGenerationResponse") and not CONFIG["IS_IMG_GEN2"]:
             result["imageUrl"] = response["cachedImageGenerationResponse"]["imageUrl"]
         return result
+        
+    message_tag = response.get("messageTag")
+    token = response.get("token")
+    is_thinking_signal = response.get("isThinking") or response.get("messageStepId")
 
-    if model == 'grok-2':
-        result["token"] = response.get("token")
-    elif model in ['grok-2-search', 'grok-3-search']:
-        if response.get("webSearchResults") and CONFIG["ISSHOW_SEARCH_RESULTS"]:
-            result["token"] = f"\r\n<think>{Utils.organize_search_results(response['webSearchResults'])}</think>\r\n"
+    # 1. 心跳 (最高优先级)
+    if message_tag == 'heartbeat':
+        result["token"] = "" 
+        return result
+
+    # 2. 白名单：小总结。无论如何都要发送，但格式取决于 SHOW_THINKING
+    SAFE_SUMMARY_TAGS = {'header', 'summary'}
+    if message_tag in SAFE_SUMMARY_TAGS and token:
+        if CONFIG["SHOW_THINKING"]:
+            result["token"] = f"<think>{token}</think>"
         else:
-            result["token"] = response.get("token")
-    elif model == 'grok-3':
-        result["token"] = response.get("token")
-    elif model in ['grok-3-deepsearch', 'grok-3-deepersearch']:
-        if response.get("messageStepId") and not CONFIG["SHOW_THINKING"]:
-            return result
-        if response.get("messageStepId") and not CONFIG["IS_THINKING"]:
-            result["token"] = "<think>" + response.get("token", "")
-            CONFIG["IS_THINKING"] = True
-        elif not response.get("messageStepId") and CONFIG["IS_THINKING"] and response.get("messageTag") == "final":
-            result["token"] = "</think>" + response.get("token", "")
-            CONFIG["IS_THINKING"] = False
-        elif (response.get("messageStepId") and CONFIG["IS_THINKING"] and response.get("messageTag") == "assistant") or response.get("messageTag") == "final":
-            result["token"] = response.get("token","")
-        elif (CONFIG["IS_THINKING"] and response.get("token","").get("action","") == "webSearch"):
-            result["token"] = response.get("token","").get("action_input","").get("query","")            
-        elif (CONFIG["IS_THINKING"] and response.get("webSearchResults")):
-            result["token"] = Utils.organize_search_results(response['webSearchResults'])
-    elif model == 'grok-3-reasoning':
-        if response.get("isThinking") and not CONFIG["SHOW_THINKING"]:
-            return result
+            # 当不显示思考时，我们只发送小总结本身，不加标签，用于保活和展示进度
+            result["token"] = token
+        return result
+    
+    # 3. 白名单：搜索结果
+    if message_tag in ['raw_function_result', 'citedWebSearchResults'] and response.get('webSearchResults'):
+        if CONFIG["ISSHOW_SEARCH_RESULTS"]:
+            content = Utils.organize_search_results(response['webSearchResults'])
+            if CONFIG["SHOW_THINKING"]:
+                result["token"] = f"<think>{content}</think>"
+            else:
+                result["token"] = content
+        return result
 
-        if response.get("isThinking") and not CONFIG["IS_THINKING"]:
-            result["token"] = "<think>" + response.get("token", "")
-            CONFIG["IS_THINKING"] = True
-        elif not response.get("isThinking") and CONFIG["IS_THINKING"]:
-            result["token"] = "</think>" + response.get("token", "")
-            CONFIG["IS_THINKING"] = False
-        else:
-            result["token"] = response.get("token")
-
+    # 4. 丢弃规则：如果一个块被标记为“思考”，但又不是我们白名单里的“小总结”，
+    #    并且我们不希望显示完整思考过程，那就丢弃它。
+    if is_thinking_signal and message_tag not in SAFE_SUMMARY_TAGS:
+        if not CONFIG["SHOW_THINKING"]:
+            return result # 返回空，实现丢弃
+    
+    # 5. 默认行为：剩下的所有带 token 的块，都视为正文
+    if token:
+        result["token"] = token
+    
     return result
-
 def handle_image_response(image_url):
     max_retries = 2
     retry_count = 0
@@ -1556,10 +1506,10 @@ def chat_completions():
             else:
                 CONFIG["SERVER"]['COOKIE'] = CONFIG['API']['SIGNATURE_COOKIE']
             logger.info(json.dumps(request_payload,indent=2),"Server")
-            
             try:
                 proxy_options = Utils.get_proxy_options()
 
+                # 使用智能重试机制发起请求
                 def make_grok_request(**request_kwargs):
                     return curl_requests.post(
                         f"{CONFIG['API']['BASE_URL']}/rest/app-chat/conversations/new",
@@ -1578,61 +1528,36 @@ def chat_completions():
                     **proxy_options
                 )
                 logger.info(CONFIG["SERVER"]['COOKIE'],"Server")
-
                 if response.status_code == 200:
                     response_status_code = 200
                     logger.info("请求成功", "Server")
                     logger.info(f"当前{model}剩余可用令牌数: {token_manager.get_token_count_for_model(model)}","Server")
 
-                    # ==========================================================
-                    # ==================== 这是核心修改区域 ====================
-                    # ==========================================================
                     try:
-                        # 无论是否流式，都统一使用新的、健壮的生成器函数
-                        # 注意我们将客户端请求的原始模型名称 `data.get("model")` 传递进去用于智能分流
-                        stream_generator = generate_openai_stream(response, data.get("model"))
-
                         if stream:
-                            # 流式请求：直接返回生成器
-                            return Response(stream_with_context(stream_generator), content_type='text/event-stream')
+                            return Response(stream_with_context(
+                                handle_stream_response(response, model)),content_type='text/event-stream')
                         else:
-                            # 非流式请求：聚合生成器的所有内容再返回
-                            full_content = ""
-                            for sse_chunk in stream_generator:
-                                if sse_chunk.startswith("data:"):
-                                    data_str = sse_chunk[len("data:"):].strip()
-                                    if data_str != "[DONE]":
-                                        try:
-                                            chunk_json = json.loads(data_str)
-                                            delta_content = chunk_json.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                            if delta_content:
-                                                full_content += delta_content
-                                        except json.JSONDecodeError:
-                                            pass
-                            return jsonify(MessageProcessor.create_chat_response(full_content, model))
+                            content = handle_non_stream_response(response, model)
+                            return jsonify(
+                                MessageProcessor.create_chat_response(content, model))
 
                     except Exception as error:
-                        logger.error(f"在处理响应流时发生错误: {str(error)}", "Server")
-                        # 即使在流处理中出错，也要正确处理令牌
+                        logger.error(str(error), "Server")
                         if CONFIG["API"]["IS_CUSTOM_SSO"]:
-                            raise ValueError(f"自定义SSO令牌在模型 {model} 的请求中出错")
+                            raise ValueError(f"自定义SSO令牌当前模型{model}的请求次数已失效")
                         token_manager.remove_token_from_model(model, CONFIG["API"]["SIGNATURE_COOKIE"])
                         if token_manager.get_token_count_for_model(model) == 0:
                             raise ValueError(f"{model} 次数已达上限，请切换其他模型或者重新对话")
-                        # 出错后，应该跳出内部的 try，让外层的 while 循环决定是否重试
-                        raise error # 重新抛出异常，让外层捕获
-                    # ==========================================================
-                    # ==================== 核心修改区域结束 ====================
-                    # ==========================================================
-
                 elif response.status_code == 403:
                     response_status_code = 403
-                    token_manager.reduce_token_request_count(model,1)
+                    token_manager.reduce_token_request_count(model,1)#重置去除当前因为错误未成功请求的次数，确保不会因为错误未成功请求的次数导致次数上限
                     if token_manager.get_token_count_for_model(model) == 0:
                         raise ValueError(f"{model} 次数已达上限，请切换其他模型或者重新对话")
-                    logger.error(f"IP暂时被封(403)。响应头: {response.headers}, 响应内容: {response.text}")
+                    print("状态码:", response.status_code)
+                    print("响应头:", response.headers)
+                    print("响应内容:", response.text)
                     raise ValueError(f"IP暂时被封无法破盾，请稍后重试或者更换ip")
-                
                 elif response.status_code == 429:
                     response_status_code = 429
                     token_manager.reduce_token_request_count(model,1)
@@ -1643,8 +1568,6 @@ def chat_completions():
                         model, CONFIG["API"]["SIGNATURE_COOKIE"])
                     if token_manager.get_token_count_for_model(model) == 0:
                         raise ValueError(f"{model} 次数已达上限，请切换其他模型或者重新对话")
-                    # 对于 429，应该立即重试
-                    continue
 
                 else:
                     if CONFIG["API"]["IS_CUSTOM_SSO"]:
@@ -1655,32 +1578,25 @@ def chat_completions():
                     logger.info(
                         f"当前{model}剩余可用令牌数: {token_manager.get_token_count_for_model(model)}",
                         "Server")
-                    # 对于其他未知错误，也进行重试
-                    continue
 
             except Exception as e:
                 logger.error(f"请求处理异常: {str(e)}", "Server")
                 if CONFIG["API"]["IS_CUSTOM_SSO"]:
                     raise
                 continue
-        
-        # 如果循环结束都没有成功返回，说明所有重试都失败了
         if response_status_code == 403:
             raise ValueError('IP暂时被封无法破盾，请稍后重试或者更换ip')
-        else:
-            raise ValueError('当前模型所有令牌暂无可用或请求失败，请稍后重试')
+        elif response_status_code == 500:
+            raise ValueError('当前模型所有令牌暂无可用，请稍后重试')    
 
     except Exception as error:
         logger.error(str(error), "ChatAPI")
-        # 确保 response_status_code 在出错时有一个合理的值
-        if response_status_code not in [401, 403, 429]:
-            response_status_code = 500
         return jsonify(
             {"error": {
                 "message": str(error),
                 "type": "server_error"
             }}), response_status_code
-            
+
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def catch_all(path):
