@@ -11,10 +11,8 @@ git clone https://github.com/kbtit/grok2api.git
 ```bash
 cd grok2api
 ```
-### 创建配置文件
-```bash
-#修改.env，(根据原项目大佬说的写).env
-```
+#复制后一定要根据自己的实际情况修改.env，里面对应的参数请参考原项目的文档
+cp .sample .env
 ### 运行docker脚本
 ```bash
 bash ./rebuild.sh
