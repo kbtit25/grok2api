@@ -5,7 +5,7 @@
 1.最好直接用docker运行，简单方便，我也写好了对应的脚本，有需要可以自己更改参数
 ### 克隆项目
 ```bash
-git clone https://github.com/kbtit/grok2api.git
+git clone https://github.com/kbtit25/grok2api.git
 ```
 ### 进入项目
 ```bash
