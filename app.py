@@ -142,15 +142,15 @@ if not DATA_DIR.exists():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG = {
     "MODELS": {
-        'grok-3': 'grok-3',
-        'grok-3-imageGen': 'grok-3',
-        'grok-3-search': 'grok-3',
-        "grok-4": "grok-4",
-        "grok-4-search": "grok-4",
-        "grok-4-imageGen": "grok-4",
-        "grok-4-deepsearch": "grok-4",
-        "grok-4-deepersearch": "grok-4",
-        "grok-4-reasoning": "grok-4"
+        'grok-4': 'grok-4',
+        'grok-4-imageGen': 'grok-4',
+        'grok-4-search': 'grok-4',
+        "grok-3": "grok-3",
+        "grok-3-search": "grok-3",
+        "grok-3-imageGen": "grok-3",
+        "grok-3-deepsearch": "grok-3",
+        "grok-3-deepersearch": "grok-3",
+        "grok-3-reasoning": "grok-3"
     },
     "API": {
         "IS_TEMP_CONVERSATION": os.environ.get("IS_TEMP_CONVERSATION", "true").lower() == "true",
@@ -347,23 +347,23 @@ class AuthTokenManager:
         self.token_status_map = {}
 
         self.model_config = {
-            "grok-3": {
-                "RequestFrequency": 100,
+            "grok-4": {
+                "RequestFrequency": 20,
                 "ExpirationTime": 2 * 60 * 60 * 1000  # 1小时
             },
-            "grok-4": {
+            "grok-3": {
                 "RequestFrequency": 100,
                 "ExpirationTime": 2 * 60 * 60 * 1000  # 2小时
             },
-            "grok-4-deepsearch": {
+            "grok-3-deepsearch": {
                 "RequestFrequency": 30,
                 "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
             },
-            "grok-4-deepersearch": {
-                "RequestFrequency": 10,
+            "grok-3-deepersearch": {
+                "RequestFrequency": 30,
                 "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
             },
-            "grok-4-reasoning": {
+            "grok-3-reasoning": {
                 "RequestFrequency": 30,
                 "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
             }
@@ -742,6 +742,45 @@ class Utils:
         return '\n\n'.join(formatted_results)
 
     @staticmethod
+    def safe_filter_grok_tags(text):
+        """
+        使用循环和字符串查找，安全地移除所有已知的 Grok 标签块。
+        这个版本简化了所有逻辑，只做最基础和最可靠的查找替换。
+        """
+        if not text or not isinstance(text, str):
+            return text
+
+        # 我们需要移除的标签对
+        tags_to_remove = [
+            ("<xai:tool_usage_card>", "</xai:tool_usage_card>"),
+            # Grok 4 的最终答案里，用的是 <grok:render ...> ... </grok:render> 这种闭合结构
+            ("<grok:render", "</grok:render>")
+        ]
+
+        for start_tag, end_tag in tags_to_remove:
+            # 只要文本中还存在开标签，就一直循环处理
+            while True:
+                start_index = text.find(start_tag)
+                
+                # 如果找不到开标签，说明这种标签已经处理干净了，跳出内层循环
+                if start_index == -1:
+                    break
+                
+                # 从开标签之后的位置开始，查找对应的闭标签
+                end_index = text.find(end_tag, start_index)
+                
+                # 如果找不到对应的闭标签，说明这个标签块不完整或格式错误。
+                # 为了安全起见，我们只移除这个孤立的开标签，然后停止处理这种标签，防止无限循环。
+                if end_index == -1:
+                    text = text.replace(start_tag, '', 1)
+                    break
+                
+                # 精确地切掉从开标签到闭标签的整个部分
+                # end_index + len(end_tag) 是为了连闭标签本身也一起切掉
+                text = text[:start_index] + text[end_index + len(end_tag):]
+                
+        return text.strip()
+    @staticmethod
     def create_auth_headers(model, is_return=False):
         return token_manager.get_next_token_for_model(model, is_return)
 
@@ -907,14 +946,14 @@ class GrokApiClient:
     #         logger.error(str(error), "Server")
     #         raise ValueError(error)
     def prepare_chat_request(self, request):
-        if ((request["model"] == 'grok-3-imageGen' or request["model"] == 'grok-4-imageGen') and
+        if ((request["model"] == 'grok-4-imageGen' or request["model"] == 'grok-3-imageGen') and
             not CONFIG["API"]["PICGO_KEY"] and not CONFIG["API"]["TUMY_KEY"] and
             request.get("stream", False)):
             raise ValueError("该模型流式输出需要配置PICGO或者TUMY图床密钥!")
 
         # system_message, todo_messages = self.convert_system_messages(request["messages"]).values()
         todo_messages = request["messages"]
-        if request["model"] in ['grok-3-imageGen', 'grok-4-imageGen', 'grok-4-deepsearch']:
+        if request["model"] in ['grok-4-imageGen', 'grok-3-imageGen', 'grok-3-deepsearch']:
             last_message = todo_messages[-1]
             if last_message["role"] != 'user':
                 raise ValueError('此模型最后一条消息必须是用户消息!')
@@ -926,11 +965,11 @@ class GrokApiClient:
         message_length = 0
         convert_to_file = False
         last_message_content = ''
-        search = request["model"] in ['grok-3-search', 'grok-4-search']
+        search = request["model"] in ['grok-4-search', 'grok-3-search']
         deepsearchPreset = ''
-        if request["model"] == 'grok-4-deepsearch':
+        if request["model"] == 'grok-3-deepsearch':
             deepsearchPreset = 'default'
-        elif request["model"] == 'grok-4-deepersearch':
+        elif request["model"] == 'grok-3-deepersearch':
             deepsearchPreset = 'deeper'
 
         # 移除<think>标签及其内容和base64图片
@@ -1018,7 +1057,7 @@ class GrokApiClient:
             "imageGenerationCount": 1,
             "forceConcise": False,
             "toolOverrides": {
-                "imageGen": request["model"] in ['grok-3-imageGen', 'grok-4-imageGen'],
+                "imageGen": request["model"] in ['grok-4-imageGen', 'grok-3-imageGen'],
                 "webSearch": search,
                 "xSearch": search,
                 "xMediaSearch": search,
@@ -1029,7 +1068,7 @@ class GrokApiClient:
             "sendFinalMetadata": True,
             "customPersonality": "",
             "deepsearchPreset": deepsearchPreset,
-            "isReasoning": request["model"] == 'grok-4-reasoning',
+            "isReasoning": request["model"] == 'grok-3-reasoning',
             "disableTextFollowUps": True
         }
 
@@ -1069,53 +1108,76 @@ class MessageProcessor:
         }
 
 
+# =======================================================================================
+# ================== process_model_response (V7 - 精准提取终极版) ==================
+# =======================================================================================
 def process_model_response(response, model):
-    result = {"token": None, "imageUrl": None}
+    """
+    精准提取策略：明确区分“小总结”和“最终答案块”，不再使用任何正则表达式过滤。
+    这是最安全、最能保证格式正确的方案。
+    """
+    result = {"token": None, "imageUrl": None, "type": None}
 
+    # --- 图片生成逻辑 (保持不变) ---
     if CONFIG["IS_IMG_GEN"]:
         if response.get("cachedImageGenerationResponse") and not CONFIG["IS_IMG_GEN2"]:
             result["imageUrl"] = response["cachedImageGenerationResponse"]["imageUrl"]
+            result["type"] = 'image_url'
         return result
-        
+
     message_tag = response.get("messageTag")
     token = response.get("token")
-    is_thinking_signal = response.get("isThinking") or response.get("messageStepId")
 
-    # 1. 心跳 (最高优先级)
+    # 规则 1：心跳
     if message_tag == 'heartbeat':
-        result["token"] = "" 
+        result["type"] = 'heartbeat'
         return result
 
-    # 2. 白名单：小总结。无论如何都要发送，但格式取决于 SHOW_THINKING
-    SAFE_SUMMARY_TAGS = {'header', 'summary'}
-    if message_tag in SAFE_SUMMARY_TAGS and token:
-        if CONFIG["SHOW_THINKING"]:
-            result["token"] = f"<think>{token}</think>"
-        else:
-            # 当不显示思考时，我们只发送小总结本身，不加标签，用于保活和展示进度
-            result["token"] = token
-        return result
-    
-    # 3. 白名单：搜索结果
-    if message_tag in ['raw_function_result', 'citedWebSearchResults'] and response.get('webSearchResults'):
-        if CONFIG["ISSHOW_SEARCH_RESULTS"]:
-            content = Utils.organize_search_results(response['webSearchResults'])
-            if CONFIG["SHOW_THINKING"]:
-                result["token"] = f"<think>{content}</think>"
-            else:
-                result["token"] = content
+    # 规则 2：最终答案块 (Grok 4) - 直接提取，无需过滤
+    if response.get("modelResponse") and isinstance(response["modelResponse"], dict):
+        final_message = response["modelResponse"].get("message")
+        if final_message:
+            # 最终答案是纯净的，我们在这里调用过滤器，把里面的 <grok:render> 去掉
+            result["token"] = Utils.safe_filter_grok_tags(final_message)
+            result["type"] = 'content'
         return result
 
-    # 4. 丢弃规则：如果一个块被标记为“思考”，但又不是我们白名单里的“小总结”，
-    #    并且我们不希望显示完整思考过程，那就丢弃它。
-    if is_thinking_signal and message_tag not in SAFE_SUMMARY_TAGS:
+    # 规则 3：白名单 - 识别“小总结”和“搜索结果”，并进行安全过滤
+    THINKING_TAGS = {'header', 'summary', 'raw_function_result', 'citedWebSearchResults'}
+    if message_tag in THINKING_TAGS:
+        content_to_filter = None
+        if token:
+            content_to_filter = token
+        elif response.get('webSearchResults') and CONFIG["ISSHOW_SEARCH_RESULTS"]:
+            content_to_filter = Utils.organize_search_results(response['webSearchResults'])
+            
+        if content_to_filter:
+            # 在这里调用我们的安全过滤器！
+            filtered_content = Utils.safe_filter_grok_tags(content_to_filter)
+            if filtered_content: # 确保过滤后还有内容
+                result["token"] = f"\n{filtered_content}\n"
+                result["type"] = 'thinking'
+        return result
+
+    # 规则 4：内心独白过滤
+    is_verbose_thinking = (response.get("isThinking") or response.get("messageStepId")) and message_tag not in {'header', 'summary'}
+    if is_verbose_thinking:
         if not CONFIG["SHOW_THINKING"]:
-            return result # 返回空，实现丢弃
-    
-    # 5. 默认行为：剩下的所有带 token 的块，都视为正文
-    if token:
-        result["token"] = token
-    
+            return result # 丢弃
+        elif token:
+            # 即便显示，也要过滤掉XML
+            filtered_token = Utils.safe_filter_grok_tags(token)
+            if filtered_token:
+                result["token"] = filtered_token
+                result["type"] = 'thinking'
+        return result
+
+    # 规则 5：旧模型的 final token
+    if message_tag == 'final' and token:
+        result["token"] = token # 旧模型final不含xml，无需过滤
+        result["type"] = 'content'
+        return result
+
     return result
 def handle_image_response(image_url):
     max_retries = 2
@@ -1274,10 +1336,13 @@ def handle_stream_response(response, model):
             try:
                 line_json = json.loads(chunk.decode("utf-8").strip())
                 print(line_json)
+
                 if line_json.get("error"):
-                    logger.error(json.dumps(line_json, indent=2), "Server")
-                    yield json.dumps({"error": "RateLimitError"}) + "\n\n"
-                    return
+                    error_message = line_json["error"].get("message", "Unknown error from Grok stream")
+                    logger.error(f"收到 Grok 流内错误，已忽略并继续处理: {error_message}", "Server")
+                    
+                    # 不要 yield 错误，也不要 return，直接跳过这个错误块，继续接收下一个
+                    continue
 
                 response_data = line_json.get("result", {}).get("response")
                 if not response_data:
@@ -1610,4 +1675,4 @@ if __name__ == '__main__':
         host='0.0.0.0',
         port=CONFIG["SERVER"]["PORT"],
         debug=False
-    )
+        )
