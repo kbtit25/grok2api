@@ -1107,15 +1107,7 @@ class MessageProcessor:
             "usage": None
         }
 
-
-# =======================================================================================
-# ================== process_model_response (V7 - 精准提取终极版) ==================
-# =======================================================================================
 def process_model_response(response, model):
-    """
-    精准提取策略：明确区分“小总结”和“最终答案块”，不再使用任何正则表达式过滤。
-    这是最安全、最能保证格式正确的方案。
-    """
     result = {"token": None, "imageUrl": None, "type": None}
 
     # --- 图片生成逻辑 (保持不变) ---
@@ -1128,21 +1120,28 @@ def process_model_response(response, model):
     message_tag = response.get("messageTag")
     token = response.get("token")
 
-    # 规则 1：心跳
+    # 规则 1：心跳 (最高优先级)
     if message_tag == 'heartbeat':
         result["type"] = 'heartbeat'
         return result
 
-    # 规则 2：最终答案块 (Grok 4) - 直接提取，无需过滤
+    # 规则 2：最终答案块 (Grok 4 新格式) - 这是我们唯一信任的最终答案来源
     if response.get("modelResponse") and isinstance(response["modelResponse"], dict):
         final_message = response["modelResponse"].get("message")
         if final_message:
-            # 最终答案是纯净的，我们在这里调用过滤器，把里面的 <grok:render> 去掉
+            # 在这里调用我们之前的安全过滤器
             result["token"] = Utils.safe_filter_grok_tags(final_message)
             result["type"] = 'content'
         return result
 
-    # 规则 3：白名单 - 识别“小总结”和“搜索结果”，并进行安全过滤
+    # ==================== 关键修改点 ====================
+    # 规则 3：明确忽略所有零散的 'final' 块。
+    # 因为我们知道所有内容最终都会在 'modelResponse' 块里出现。
+    if message_tag == 'final':
+        return result # 返回空结果，直接丢弃
+    # =====================================================
+
+    # 规则 4：白名单 - “小总结”和“搜索结果”
     THINKING_TAGS = {'header', 'summary', 'raw_function_result', 'citedWebSearchResults'}
     if message_tag in THINKING_TAGS:
         content_to_filter = None
@@ -1150,33 +1149,31 @@ def process_model_response(response, model):
             content_to_filter = token
         elif response.get('webSearchResults') and CONFIG["ISSHOW_SEARCH_RESULTS"]:
             content_to_filter = Utils.organize_search_results(response['webSearchResults'])
-            
+        
         if content_to_filter:
-            # 在这里调用我们的安全过滤器！
             filtered_content = Utils.safe_filter_grok_tags(content_to_filter)
-            if filtered_content: # 确保过滤后还有内容
-                result["token"] = f"\n{filtered_content}\n"
+            if filtered_content:
+                result["token"] = filtered_content
                 result["type"] = 'thinking'
         return result
 
-    # 规则 4：内心独白过滤
+    # 规则 5：内心独白过滤
     is_verbose_thinking = (response.get("isThinking") or response.get("messageStepId")) and message_tag not in {'header', 'summary'}
     if is_verbose_thinking:
         if not CONFIG["SHOW_THINKING"]:
             return result # 丢弃
         elif token:
-            # 即便显示，也要过滤掉XML
             filtered_token = Utils.safe_filter_grok_tags(token)
             if filtered_token:
                 result["token"] = filtered_token
                 result["type"] = 'thinking'
         return result
-
-    # 规则 5：旧模型的 final token
-    if message_tag == 'final' and token:
-        result["token"] = token # 旧模型final不含xml，无需过滤
+    
+    # 默认回退，以防万一。
+    # 这会捕捉到一些我们未知的、但带有 token 的块。
+    if token:
+        result["token"] = Utils.safe_filter_grok_tags(token)
         result["type"] = 'content'
-        return result
 
     return result
 def handle_image_response(image_url):
@@ -1321,45 +1318,91 @@ def handle_non_stream_response(response, model):
     except Exception as error:
         logger.error(str(error), "Server")
         raise
+# =======================================================================================
+# =================== handle_stream_response (强制段落分隔的最终版) ===================
+# =======================================================================================
 def handle_stream_response(response, model):
     def generate():
-        logger.info("开始处理流式响应", "Server")
-
+        logger.info("开始处理流式响应 (强制段落分隔的最终版)", "Server")
         stream = response.iter_lines()
+        
+        # 这些全局状态的重置保留原作者的逻辑
         CONFIG["IS_THINKING"] = False
         CONFIG["IS_IMG_GEN"] = False
         CONFIG["IS_IMG_GEN2"] = False
+
+        # 状态机，用于跟踪是否在<think>块内部
+        is_in_think_block = False
+
+        # 这是一个内部辅助函数，现在只负责格式化和发送
+        def yield_content(content_to_yield, content_type='content'):
+            nonlocal is_in_think_block
+            
+            is_thinking_content = content_type == 'thinking'
+
+            # 状态切换：思考开始
+            if is_thinking_content and not is_in_think_block:
+                is_in_think_block = True
+                payload = MessageProcessor.create_chat_response('<think>', model, True)
+                yield f"data: {json.dumps(payload)}\n\n"
+            
+            # 状态切换：思考结束，并用两个换行符强制创建新段落
+            elif not is_thinking_content and is_in_think_block:
+                is_in_think_block = False
+                # ==================== 关键修复 1：使用 \n\n ====================
+                payload = MessageProcessor.create_chat_response('</think>\n\n', model, True)
+                json_payload = json.dumps(payload)
+                yield f"data: {json_payload}\n\n"
+
+            # 只要是思考内容，就在前面加上换行符
+            if is_thinking_content and content_to_yield:
+                 content_to_yield = "\n" + content_to_yield
+
+            # 发送实际内容
+            if content_to_yield:
+                 payload = MessageProcessor.create_chat_response(content_to_yield, model, True)
+                 yield f"data: {json.dumps(payload)}\n\n"
 
         for chunk in stream:
             if not chunk:
                 continue
             try:
                 line_json = json.loads(chunk.decode("utf-8").strip())
-                print(line_json)
+                print(line_json) # 保留你的调试打印
 
                 if line_json.get("error"):
                     error_message = line_json["error"].get("message", "Unknown error from Grok stream")
                     logger.error(f"收到 Grok 流内错误，已忽略并继续处理: {error_message}", "Server")
-                    
-                    # 不要 yield 错误，也不要 return，直接跳过这个错误块，继续接收下一个
                     continue
 
                 response_data = line_json.get("result", {}).get("response")
                 if not response_data:
                     continue
 
+                # 图片生成的标志位设置，保留原作者逻辑
                 if response_data.get("doImgGen") or response_data.get("imageAttachmentInfo"):
                     CONFIG["IS_IMG_GEN"] = True
 
+                # 调用我们最终版的、智能的 process_model_response
                 result = process_model_response(response_data, model)
-
-                if result["token"]:
-                    yield f"data: {json.dumps(MessageProcessor.create_chat_response(result['token'], model, True))}\n\n"
-
-                if result["imageUrl"]:
+                
+                # --- 主分发逻辑 ---
+                if result.get("type") == 'heartbeat':
+                    yield ":ping\n\n"
+                
+                elif result.get("type") in ['thinking', 'content']:
+                    # 这个分支处理所有文本内容（思考和正文）
+                    for part in yield_content(result.get("token"), content_type=result["type"]):
+                        yield part
+                
+                elif result.get("imageUrl"): # 保留原作者的 imageUrl 检查方式
+                    # --- 完整的图片处理逻辑 ---
                     CONFIG["IS_IMG_GEN2"] = True
                     image_data = handle_image_response(result["imageUrl"])
-                    yield f"data: {json.dumps(MessageProcessor.create_chat_response(image_data, model, True))}\n\n"
+                    # 将图片Markdown作为'content'类型发送，确保<think>标签能正确闭合
+                    for part in yield_content(image_data, content_type='content'):
+                        yield part
+                    # --- 图片处理逻辑结束 ---
 
             except json.JSONDecodeError:
                 continue
@@ -1367,9 +1410,15 @@ def handle_stream_response(response, model):
                 logger.error(f"处理流式响应行时出错: {str(e)}", "Server")
                 continue
 
+        # 循环结束后，确保如果仍在思考块内，也要闭合标签并加上换行
+        if is_in_think_block:
+            # ==================== 关键修复 2：同样使用 \n\n ====================
+            payload = MessageProcessor.create_chat_response('</think>\n\n', model, True)
+            json_payload = json.dumps(payload)
+            yield f"data: {json_payload}\n\n"
+
         yield "data: [DONE]\n\n"
     return generate()
-
 def initialization():
     sso_array = os.environ.get("SSO", "").split(',')
     logger.info("开始加载令牌", "Server")
