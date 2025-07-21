@@ -1125,20 +1125,17 @@ def process_model_response(response, model):
         result["type"] = 'heartbeat'
         return result
 
-    # 规则 2：最终答案块 (Grok 4 新格式) - 这是我们唯一信任的最终答案来源
+    # 规则 2：最终答案块 (Grok 4 新格式)
     if response.get("modelResponse") and isinstance(response["modelResponse"], dict):
         final_message = response["modelResponse"].get("message")
         if final_message:
-            # 在这里调用我们之前的安全过滤器
             result["token"] = Utils.safe_filter_grok_tags(final_message)
             result["type"] = 'content'
         return result
-
-    # ==================== 关键修改点 ====================
-    # 规则 3：明确忽略所有零散的 'final' 块。
-    # 因为我们知道所有内容最终都会在 'modelResponse' 块里出现。
+        
     if message_tag == 'final':
-        return result # 返回空结果，直接丢弃
+        result["type"] = 'heartbeat' 
+        return result
     # =====================================================
 
     # 规则 4：白名单 - “小总结”和“搜索结果”
@@ -1157,11 +1154,12 @@ def process_model_response(response, model):
                 result["type"] = 'thinking'
         return result
 
-    # 规则 5：内心独白过滤
+    # 规则 5：内心独白过滤（或心跳转换）
     is_verbose_thinking = (response.get("isThinking") or response.get("messageStepId")) and message_tag not in {'header', 'summary'}
     if is_verbose_thinking:
         if not CONFIG["SHOW_THINKING"]:
-            return result # 丢弃
+            result["type"] = 'heartbeat' 
+            return result
         elif token:
             filtered_token = Utils.safe_filter_grok_tags(token)
             if filtered_token:
@@ -1169,8 +1167,7 @@ def process_model_response(response, model):
                 result["type"] = 'thinking'
         return result
     
-    # 默认回退，以防万一。
-    # 这会捕捉到一些我们未知的、但带有 token 的块。
+    # 默认回退
     if token:
         result["token"] = Utils.safe_filter_grok_tags(token)
         result["type"] = 'content'
@@ -1318,12 +1315,15 @@ def handle_non_stream_response(response, model):
     except Exception as error:
         logger.error(str(error), "Server")
         raise
+
 # =======================================================================================
-# =================== handle_stream_response (强制段落分隔的最终版) ===================
+# =================== handle_stream_response (日志正常的完整最终版) ===================
 # =======================================================================================
 def handle_stream_response(response, model):
     def generate():
-        logger.info("开始处理流式响应 (强制段落分隔的最终版)", "Server")
+        # --- 确保这句日志在这里 ---
+        logger.info("开始处理流式响应 (日志正常的完整最终版)", "Server")
+        
         stream = response.iter_lines()
         
         # 这些全局状态的重置保留原作者的逻辑
@@ -1349,7 +1349,6 @@ def handle_stream_response(response, model):
             # 状态切换：思考结束，并用两个换行符强制创建新段落
             elif not is_thinking_content and is_in_think_block:
                 is_in_think_block = False
-                # ==================== 关键修复 1：使用 \n\n ====================
                 payload = MessageProcessor.create_chat_response('</think>\n\n', model, True)
                 json_payload = json.dumps(payload)
                 yield f"data: {json_payload}\n\n"
@@ -1412,7 +1411,6 @@ def handle_stream_response(response, model):
 
         # 循环结束后，确保如果仍在思考块内，也要闭合标签并加上换行
         if is_in_think_block:
-            # ==================== 关键修复 2：同样使用 \n\n ====================
             payload = MessageProcessor.create_chat_response('</think>\n\n', model, True)
             json_payload = json.dumps(payload)
             yield f"data: {json_payload}\n\n"
@@ -1724,4 +1722,4 @@ if __name__ == '__main__':
         host='0.0.0.0',
         port=CONFIG["SERVER"]["PORT"],
         debug=False
-        )
+    )
