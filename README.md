@@ -2,7 +2,7 @@
 # grok2API 接入指南：基于 python 的实现
 
 ## 写了一点自己的东西
-1.最好直接用docker运行，简单方便，我也写好了对应的脚本，有需要可以自己更改参数
+1.最好直接用docker运行，简单方便，我也写好了对应的脚本，有需要可以自己更改参数，readme看前几行和原作者的环境变量说明就行
 ### 克隆项目
 ```bash
 git clone https://github.com/kbtit25/grok2api.git
