@@ -741,44 +741,31 @@ class Utils:
 
         return '\n\n'.join(formatted_results)
 
+
     @staticmethod
     def safe_filter_grok_tags(text):
         """
-        使用循环和字符串查找，安全地移除所有已知的 Grok 标签块。
-        这个版本简化了所有逻辑，只做最基础和最可靠的查找替换。
+        只移除 <xai:tool_usage_card>，不再处理 <grok:render>。
         """
         if not text or not isinstance(text, str):
             return text
-
-        # 我们需要移除的标签对
-        tags_to_remove = [
-            ("<xai:tool_usage_card>", "</xai:tool_usage_card>"),
-            # Grok 4 的最终答案里，用的是 <grok:render ...> ... </grok:render> 这种闭合结构
-            ("<grok:render", "</grok:render>")
-        ]
-
-        for start_tag, end_tag in tags_to_remove:
-            # 只要文本中还存在开标签，就一直循环处理
-            while True:
-                start_index = text.find(start_tag)
-                
-                # 如果找不到开标签，说明这种标签已经处理干净了，跳出内层循环
-                if start_index == -1:
-                    break
-                
-                # 从开标签之后的位置开始，查找对应的闭标签
-                end_index = text.find(end_tag, start_index)
-                
-                # 如果找不到对应的闭标签，说明这个标签块不完整或格式错误。
-                # 为了安全起见，我们只移除这个孤立的开标签，然后停止处理这种标签，防止无限循环。
-                if end_index == -1:
-                    text = text.replace(start_tag, '', 1)
-                    break
-                
-                # 精确地切掉从开标签到闭标签的整个部分
-                # end_index + len(end_tag) 是为了连闭标签本身也一起切掉
-                text = text[:start_index] + text[end_index + len(end_tag):]
-                
+    
+    # 我们只处理这一个标签
+        start_tag, end_tag = ("<xai:tool_usage_card>", "</xai:tool_usage_card>")
+    
+        while True:
+            end_index = text.rfind(end_tag)
+            if end_index == -1:
+                break
+        
+            start_index = text.rfind(start_tag, 0, end_index)
+            if start_index == -1:
+                break
+        
+            text = text[:start_index] + text[end_index + len(end_tag):]
+            
+    # 注意：我们依然保留 strip()，因为它对小总结是必要的。
+    # 我们将在下游处理换行符的问题。
         return text.strip()
     @staticmethod
     def create_auth_headers(model, is_return=False):
@@ -1108,9 +1095,9 @@ class MessageProcessor:
         }
 
 def process_model_response(response, model):
-    result = {"token": None, "imageUrl": None, "type": None}
+    result = {"token": None, "type": None}
 
-    # --- 图片生成逻辑 (保持不变) ---
+    # --- 图片逻辑 (保持不变) ---
     if CONFIG["IS_IMG_GEN"]:
         if response.get("cachedImageGenerationResponse") and not CONFIG["IS_IMG_GEN2"]:
             result["imageUrl"] = response["cachedImageGenerationResponse"]["imageUrl"]
@@ -1119,59 +1106,59 @@ def process_model_response(response, model):
 
     message_tag = response.get("messageTag")
     token = response.get("token")
-
-    # 规则 1：心跳 (最高优先级)
+    
+    # 规则 1：心跳 (通用，最高优先级)
     if message_tag == 'heartbeat':
         result["type"] = 'heartbeat'
         return result
 
-    # 规则 2：最终答案块 (Grok 4 新格式)
+    # 规则 2：最终答案块 (所有模型的唯一、最终、可信来源)
     if response.get("modelResponse") and isinstance(response["modelResponse"], dict):
         final_message = response["modelResponse"].get("message")
         if final_message:
             result["token"] = Utils.safe_filter_grok_tags(final_message)
             result["type"] = 'content'
         return result
-        
-    if message_tag == 'final':
-        result["type"] = 'heartbeat' 
-        return result
-    # =====================================================
 
-    # 规则 4：白名单 - “小总结”和“搜索结果”
-    THINKING_TAGS = {'header', 'summary', 'raw_function_result', 'citedWebSearchResults'}
-    if message_tag in THINKING_TAGS:
-        content_to_filter = None
-        if token:
-            content_to_filter = token
-        elif response.get('webSearchResults') and CONFIG["ISSHOW_SEARCH_RESULTS"]:
-            content_to_filter = Utils.organize_search_results(response['webSearchResults'])
-        
-        if content_to_filter:
-            filtered_content = Utils.safe_filter_grok_tags(content_to_filter)
-            if filtered_content:
-                result["token"] = filtered_content
-                result["type"] = 'thinking'
-        return result
-
-    # 规则 5：内心独白过滤（或心跳转换）
-    is_verbose_thinking = (response.get("isThinking") or response.get("messageStepId")) and message_tag not in {'header', 'summary'}
-    if is_verbose_thinking:
-        if not CONFIG["SHOW_THINKING"]:
-            result["type"] = 'heartbeat' 
+    # 规则 3：白名单 - “小总结”和“搜索结果” (只适用于 Agent 模型)
+    AGENT_MODELS = ['grok-4', 'grok-3-deepersearch', 'grok-3-deepsearch']
+    if model in AGENT_MODELS:
+        THINKING_TAGS = {'header', 'summary', 'raw_function_result', 'citedWebSearchResults'}
+        if message_tag in THINKING_TAGS:
+            content_to_filter = None
+            if token: content_to_filter = token
+            elif response.get('webSearchResults') and CONFIG["ISSHOW_SEARCH_RESULTS"]:
+                content_to_filter = Utils.organize_search_results(response['webSearchResults'])
+            
+            if content_to_filter:
+                filtered_content = Utils.safe_filter_grok_tags(content_to_filter)
+                if filtered_content:
+                    result["token"] = filtered_content
+                    result["type"] = 'thinking'
             return result
-        elif token:
-            filtered_token = Utils.safe_filter_grok_tags(token)
-            if filtered_token:
-                result["token"] = filtered_token
-                result["type"] = 'thinking'
-        return result
+
+    # 规则 4：内心独白过滤 (只适用于 Agent 模型)
+    if model in AGENT_MODELS:
+        is_verbose_thinking = (response.get("isThinking") or response.get("messageStepId")) and message_tag not in {'header', 'summary'}
+        if is_verbose_thinking:
+            if not CONFIG["SHOW_THINKING"]:
+                result["type"] = 'heartbeat' # 转换为心跳
+                return result
+            elif token:
+                filtered_token = Utils.safe_filter_grok_tags(token)
+                if filtered_token:
+                    result["token"] = filtered_token
+                    result["type"] = 'thinking'
+            return result
     
-    # 默认回退
-    if token:
+    # 规则 5：对于非 Agent 模型，我们仍然需要处理它们的 token 流
+    if model not in AGENT_MODELS and token:
         result["token"] = Utils.safe_filter_grok_tags(token)
         result["type"] = 'content'
+        return result
 
+    # 对于所有其他情况（特别是 Agent 模型的零散 final/assistant 块），
+    # 我们返回一个空 result，实现静默丢弃。
     return result
 def handle_image_response(image_url):
     max_retries = 2
@@ -1315,108 +1302,117 @@ def handle_non_stream_response(response, model):
     except Exception as error:
         logger.error(str(error), "Server")
         raise
-
 # =======================================================================================
-# =================== handle_stream_response (日志正常的完整最终版) ===================
+# =================== handle_stream_response (V23 - 最终分流版) ===================
 # =======================================================================================
 def handle_stream_response(response, model):
-    def generate():
-        # --- 确保这句日志在这里 ---
-        logger.info("开始处理流式响应 (日志正常的完整最终版)", "Server")
-        
-        stream = response.iter_lines()
-        
-        # 这些全局状态的重置保留原作者的逻辑
-        CONFIG["IS_THINKING"] = False
-        CONFIG["IS_IMG_GEN"] = False
-        CONFIG["IS_IMG_GEN2"] = False
+    
+    AGENT_MODELS = ['grok-4', 'grok-3-deepersearch', 'grok-3-deepsearch']
 
-        # 状态机，用于跟踪是否在<think>块内部
-        is_in_think_block = False
-
-        # 这是一个内部辅助函数，现在只负责格式化和发送
-        def yield_content(content_to_yield, content_type='content'):
-            nonlocal is_in_think_block
+    # ================= 分支 A: Agent 模型的专用处理逻辑 =================
+    if model in AGENT_MODELS:
+        def generate_agent():
+            logger.info(f"使用 Agent 模型专用逻辑处理: {model}", "Server")
+            stream = response.iter_lines()
             
-            is_thinking_content = content_type == 'thinking'
+            is_in_think_block = False
+            final_answer_started = False
 
-            # 状态切换：思考开始
-            if is_thinking_content and not is_in_think_block:
-                is_in_think_block = True
-                payload = MessageProcessor.create_chat_response('<think>', model, True)
-                yield f"data: {json.dumps(payload)}\n\n"
+            # Agent 模型的内部辅助函数
+            def yield_agent_content(content_to_yield, content_type='content'):
+                nonlocal is_in_think_block
+                is_thinking_content = content_type == 'thinking'
+
+                if is_thinking_content and not is_in_think_block:
+                    is_in_think_block = True
+                    payload = MessageProcessor.create_chat_response('<think>', model, True)
+                    yield f"data: {json.dumps(payload)}\n\n"
+                
+                elif not is_thinking_content and is_in_think_block:
+                    is_in_think_block = False
+                    payload = MessageProcessor.create_chat_response('</think>\n\n', model, True)
+                    json_payload = json.dumps(payload)
+                    yield f"data: {json_payload}\n\n"
+
+                if is_thinking_content and content_to_yield:
+                    content_to_yield = "\n" + content_to_yield
+
+                if content_to_yield:
+                    payload = MessageProcessor.create_chat_response(content_to_yield, model, True)
+                    yield f"data: {json.dumps(payload)}\n\n"
+
+            for chunk in stream:
+                if not chunk: continue
+                try:
+                    line_json = json.loads(chunk.decode("utf-8").strip())
+                    if line_json.get("error"): continue
+
+                    response_data = line_json.get("result", {}).get("response")
+                    if not response_data: continue
+                    
+                    # 优先处理最终答案块
+                    if response_data.get("modelResponse") and isinstance(response_data["modelResponse"], dict):
+                        final_answer_started = True
+                        for part in yield_agent_content(None, content_type='content'): # 确保闭合<think>
+                            yield part
+                        
+                        final_message = response_data["modelResponse"].get("message")
+                        if final_message:
+                            clean_message = Utils.safe_filter_grok_tags(final_message)
+                            payload = MessageProcessor.create_chat_response(clean_message, model, True)
+                            yield f"data: {json.dumps(payload)}\n\n"
+                        break
+
+                    # 处理思考过程和心跳
+                    result = process_model_response(response_data, model)
+                    if result.get("type") == 'heartbeat':
+                        yield ":ping\n\n"
+                    elif result.get("type") == 'thinking':
+                        for part in yield_agent_content(result.get("token"), content_type='thinking'):
+                            yield part
+
+                except Exception as e:
+                    logger.error(f"处理 Agent 流时出错: {str(e)}", "Server")
+                    continue
             
-            # 状态切换：思考结束，并用两个换行符强制创建新段落
-            elif not is_thinking_content and is_in_think_block:
-                is_in_think_block = False
+            if is_in_think_block and not final_answer_started:
                 payload = MessageProcessor.create_chat_response('</think>\n\n', model, True)
                 json_payload = json.dumps(payload)
                 yield f"data: {json_payload}\n\n"
 
-            # 只要是思考内容，就在前面加上换行符
-            if is_thinking_content and content_to_yield:
-                 content_to_yield = "\n" + content_to_yield
+            yield "data: [DONE]\n\n"
+        return generate_agent()
 
-            # 发送实际内容
-            if content_to_yield:
-                 payload = MessageProcessor.create_chat_response(content_to_yield, model, True)
-                 yield f"data: {json.dumps(payload)}\n\n"
+    # ================= 分支 B: 标准模型的简单“直通车”逻辑 =================
+    else:
+        def generate_standard():
+            logger.info(f"使用标准模型“无损直通车”逻辑处理: {model}", "Server")
+            stream = response.iter_lines()
 
-        for chunk in stream:
-            if not chunk:
-                continue
-            try:
-                line_json = json.loads(chunk.decode("utf-8").strip())
-                print(line_json) # 保留你的调试打印
+            for chunk in stream:
+                if not chunk: continue
+                try:
+                    line_json = json.loads(chunk.decode("utf-8").strip())
+                    if line_json.get("error"): continue
 
-                if line_json.get("error"):
-                    error_message = line_json["error"].get("message", "Unknown error from Grok stream")
-                    logger.error(f"收到 Grok 流内错误，已忽略并继续处理: {error_message}", "Server")
+                    response_data = line_json.get("result", {}).get("response")
+                    if not response_data: continue
+
+                    # 对标准模型，我们只关心 token
+                    token = response_data.get("token")
+                    
+                    # 关键修复：不再调用任何可能改变 token 的过滤函数！
+                    # 我们相信标准模型的 token 是干净的。
+                    if isinstance(token, str):
+                        payload = MessageProcessor.create_chat_response(token, model, True)
+                        yield f"data: {json.dumps(payload)}\n\n"
+
+                except Exception as e:
+                    logger.error(f"处理标准流时出错: {str(e)}", "Server")
                     continue
 
-                response_data = line_json.get("result", {}).get("response")
-                if not response_data:
-                    continue
-
-                # 图片生成的标志位设置，保留原作者逻辑
-                if response_data.get("doImgGen") or response_data.get("imageAttachmentInfo"):
-                    CONFIG["IS_IMG_GEN"] = True
-
-                # 调用我们最终版的、智能的 process_model_response
-                result = process_model_response(response_data, model)
-                
-                # --- 主分发逻辑 ---
-                if result.get("type") == 'heartbeat':
-                    yield ":ping\n\n"
-                
-                elif result.get("type") in ['thinking', 'content']:
-                    # 这个分支处理所有文本内容（思考和正文）
-                    for part in yield_content(result.get("token"), content_type=result["type"]):
-                        yield part
-                
-                elif result.get("imageUrl"): # 保留原作者的 imageUrl 检查方式
-                    # --- 完整的图片处理逻辑 ---
-                    CONFIG["IS_IMG_GEN2"] = True
-                    image_data = handle_image_response(result["imageUrl"])
-                    # 将图片Markdown作为'content'类型发送，确保<think>标签能正确闭合
-                    for part in yield_content(image_data, content_type='content'):
-                        yield part
-                    # --- 图片处理逻辑结束 ---
-
-            except json.JSONDecodeError:
-                continue
-            except Exception as e:
-                logger.error(f"处理流式响应行时出错: {str(e)}", "Server")
-                continue
-
-        # 循环结束后，确保如果仍在思考块内，也要闭合标签并加上换行
-        if is_in_think_block:
-            payload = MessageProcessor.create_chat_response('</think>\n\n', model, True)
-            json_payload = json.dumps(payload)
-            yield f"data: {json_payload}\n\n"
-
-        yield "data: [DONE]\n\n"
-    return generate()
+            yield "data: [DONE]\n\n"
+        return generate_standard()
 def initialization():
     sso_array = os.environ.get("SSO", "").split(',')
     logger.info("开始加载令牌", "Server")
@@ -1722,4 +1718,4 @@ if __name__ == '__main__':
         host='0.0.0.0',
         port=CONFIG["SERVER"]["PORT"],
         debug=False
-    )
+        )
