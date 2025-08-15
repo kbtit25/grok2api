@@ -142,6 +142,7 @@ if not DATA_DIR.exists():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG = {
     "MODELS": {
+        'grok-4-heavy': 'grok-4-heavy',
         'grok-4': 'grok-4',
         'grok-4-imageGen': 'grok-4',
         'grok-4-search': 'grok-4',
@@ -349,10 +350,10 @@ class AuthTokenManager:
         self.model_config = {
             "grok-4": {
                 "RequestFrequency": 20,
-                "ExpirationTime": 2 * 60 * 60 * 1000  # 1小时
+                "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
             },
             "grok-3": {
-                "RequestFrequency": 100,
+                "RequestFrequency": 30,
                 "ExpirationTime": 2 * 60 * 60 * 1000  # 2小时
             },
             "grok-3-deepsearch": {
@@ -365,6 +366,10 @@ class AuthTokenManager:
             },
             "grok-3-reasoning": {
                 "RequestFrequency": 30,
+                "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
+            },
+            "grok-4-heavy": {
+                "RequestFrequency": 20,
                 "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
             }
         }
@@ -742,31 +747,37 @@ class Utils:
         return '\n\n'.join(formatted_results)
 
 
+
     @staticmethod
     def safe_filter_grok_tags(text):
         """
-        只移除 <xai:tool_usage_card>，不再处理 <grok:render>。
+        只移除 <xai:tool_usage_card> 标签
         """
         if not text or not isinstance(text, str):
             return text
-    
-    # 我们只处理这一个标签
+
         start_tag, end_tag = ("<xai:tool_usage_card>", "</xai:tool_usage_card>")
     
-        while True:
-            end_index = text.rfind(end_tag)
-            if end_index == -1:
-                break
-        
-            start_index = text.rfind(start_tag, 0, end_index)
-            if start_index == -1:
-                break
-        
-            text = text[:start_index] + text[end_index + len(end_tag):]
+        if start_tag in text:
+            original_text = text
+            while True:
+                end_index = text.rfind(end_tag)
+                if end_index == -1:
+                    break
             
-    # 注意：我们依然保留 strip()，因为它对小总结是必要的。
-    # 我们将在下游处理换行符的问题。
-        return text.strip()
+                start_index = text.rfind(start_tag, 0, end_index)
+                if start_index == -1:
+                    break
+            
+                text = text[:start_index] + text[end_index + len(end_tag):]
+            
+            if text != original_text:
+                return text.strip()
+            else:
+                return text
+        else:
+            return text
+
     @staticmethod
     def create_auth_headers(model, is_return=False):
         return token_manager.get_next_token_for_model(model, is_return)
@@ -959,7 +970,6 @@ class GrokApiClient:
         elif request["model"] == 'grok-3-deepersearch':
             deepsearchPreset = 'deeper'
 
-        # 移除<think>标签及其内容和base64图片
         def remove_think_tags(text):
             import re
             text = re.sub(r'<think>[\s\S]*?<\/think>', '', text).strip()
@@ -1095,9 +1105,15 @@ class MessageProcessor:
         }
 
 def process_model_response(response, model):
+    """
+    处理来自 Grok API 的流式响应块。
+    此版本精准修复了非 Agent 模型（如 grok-3）会重复输出内容的问题，
+    方法是在接收到最终 modelResponse 块时将其忽略。
+    所有针对 Agent 模型的处理逻辑保持原始状态不变。
+    """
     result = {"token": None, "type": None}
+    AGENT_MODELS = ['grok-4-heavy', 'grok-4', 'grok-3-deepersearch', 'grok-3-deepsearch']
 
-    # --- 图片逻辑 (保持不变) ---
     if CONFIG["IS_IMG_GEN"]:
         if response.get("cachedImageGenerationResponse") and not CONFIG["IS_IMG_GEN2"]:
             result["imageUrl"] = response["cachedImageGenerationResponse"]["imageUrl"]
@@ -1107,12 +1123,13 @@ def process_model_response(response, model):
     message_tag = response.get("messageTag")
     token = response.get("token")
     
-    # 规则 1：心跳 (通用，最高优先级)
     if message_tag == 'heartbeat':
         result["type"] = 'heartbeat'
         return result
 
-    # 规则 2：最终答案块 (所有模型的唯一、最终、可信来源)
+    if model not in AGENT_MODELS and response.get("modelResponse"):
+        return result
+
     if response.get("modelResponse") and isinstance(response["modelResponse"], dict):
         final_message = response["modelResponse"].get("message")
         if final_message:
@@ -1120,8 +1137,6 @@ def process_model_response(response, model):
             result["type"] = 'content'
         return result
 
-    # 规则 3：白名单 - “小总结”和“搜索结果” (只适用于 Agent 模型)
-    AGENT_MODELS = ['grok-4', 'grok-3-deepersearch', 'grok-3-deepsearch']
     if model in AGENT_MODELS:
         THINKING_TAGS = {'header', 'summary', 'raw_function_result', 'citedWebSearchResults'}
         if message_tag in THINKING_TAGS:
@@ -1137,12 +1152,11 @@ def process_model_response(response, model):
                     result["type"] = 'thinking'
             return result
 
-    # 规则 4：内心独白过滤 (只适用于 Agent 模型)
     if model in AGENT_MODELS:
         is_verbose_thinking = (response.get("isThinking") or response.get("messageStepId")) and message_tag not in {'header', 'summary'}
         if is_verbose_thinking:
             if not CONFIG["SHOW_THINKING"]:
-                result["type"] = 'heartbeat' # 转换为心跳
+                result["type"] = 'heartbeat'
                 return result
             elif token:
                 filtered_token = Utils.safe_filter_grok_tags(token)
@@ -1151,14 +1165,11 @@ def process_model_response(response, model):
                     result["type"] = 'thinking'
             return result
     
-    # 规则 5：对于非 Agent 模型，我们仍然需要处理它们的 token 流
     if model not in AGENT_MODELS and token:
         result["token"] = Utils.safe_filter_grok_tags(token)
         result["type"] = 'content'
         return result
 
-    # 对于所有其他情况（特别是 Agent 模型的零散 final/assistant 块），
-    # 我们返回一个空 result，实现静默丢弃。
     return result
 def handle_image_response(image_url):
     max_retries = 2
@@ -1302,12 +1313,10 @@ def handle_non_stream_response(response, model):
     except Exception as error:
         logger.error(str(error), "Server")
         raise
-# =======================================================================================
-# =================== handle_stream_response (V23 - 最终分流版) ===================
-# =======================================================================================
+
 def handle_stream_response(response, model):
     
-    AGENT_MODELS = ['grok-4', 'grok-3-deepersearch', 'grok-3-deepsearch']
+    AGENT_MODELS = ['grok-4-heavy', 'grok-4', 'grok-3-deepersearch', 'grok-3-deepsearch']
 
     # ================= 分支 A: Agent 模型的专用处理逻辑 =================
     if model in AGENT_MODELS:
@@ -1325,7 +1334,7 @@ def handle_stream_response(response, model):
 
                 if is_thinking_content and not is_in_think_block:
                     is_in_think_block = True
-                    payload = MessageProcessor.create_chat_response('<think>', model, True)
+                    payload = MessageProcessor.create_chat_response('<think>\n', model, True)
                     yield f"data: {json.dumps(payload)}\n\n"
                 
                 elif not is_thinking_content and is_in_think_block:
@@ -1333,9 +1342,6 @@ def handle_stream_response(response, model):
                     payload = MessageProcessor.create_chat_response('</think>\n\n', model, True)
                     json_payload = json.dumps(payload)
                     yield f"data: {json_payload}\n\n"
-
-                if is_thinking_content and content_to_yield:
-                    content_to_yield = "\n" + content_to_yield
 
                 if content_to_yield:
                     payload = MessageProcessor.create_chat_response(content_to_yield, model, True)
@@ -1350,10 +1356,9 @@ def handle_stream_response(response, model):
                     response_data = line_json.get("result", {}).get("response")
                     if not response_data: continue
                     
-                    # 优先处理最终答案块
                     if response_data.get("modelResponse") and isinstance(response_data["modelResponse"], dict):
                         final_answer_started = True
-                        for part in yield_agent_content(None, content_type='content'): # 确保闭合<think>
+                        for part in yield_agent_content(None, content_type='content'):
                             yield part
                         
                         final_message = response_data["modelResponse"].get("message")
@@ -1363,7 +1368,6 @@ def handle_stream_response(response, model):
                             yield f"data: {json.dumps(payload)}\n\n"
                         break
 
-                    # 处理思考过程和心跳
                     result = process_model_response(response_data, model)
                     if result.get("type") == 'heartbeat':
                         yield ":ping\n\n"
@@ -1383,11 +1387,15 @@ def handle_stream_response(response, model):
             yield "data: [DONE]\n\n"
         return generate_agent()
 
-    # ================= 分支 B: 标准模型的简单“直通车”逻辑 =================
+
+    # ================= 分支 B: 标准模型的逻辑 =================
     else:
-        def generate_standard():
-            logger.info(f"使用标准模型“无损直通车”逻辑处理: {model}", "Server")
+        def generate_standard_fixed():
+            logger.info(f"使用标准模型逻辑处理 (精准模仿作者图片处理): {model}", "Server")
             stream = response.iter_lines()
+
+            CONFIG["IS_IMG_GEN"] = False
+            CONFIG["IS_IMG_GEN2"] = False
 
             for chunk in stream:
                 if not chunk: continue
@@ -1397,22 +1405,29 @@ def handle_stream_response(response, model):
 
                     response_data = line_json.get("result", {}).get("response")
                     if not response_data: continue
-
-                    # 对标准模型，我们只关心 token
-                    token = response_data.get("token")
                     
-                    # 关键修复：不再调用任何可能改变 token 的过滤函数！
-                    # 我们相信标准模型的 token 是干净的。
-                    if isinstance(token, str):
-                        payload = MessageProcessor.create_chat_response(token, model, True)
+                    if response_data.get("doImgGen") or response_data.get("imageAttachmentInfo"):
+                        CONFIG["IS_IMG_GEN"] = True
+                    
+                    result = process_model_response(response_data, model)
+
+                    if result.get("token"):
+                        payload = MessageProcessor.create_chat_response(result["token"], model, True)
                         yield f"data: {json.dumps(payload)}\n\n"
 
+                    if result.get("imageUrl"):
+                        CONFIG["IS_IMG_GEN2"] = True
+                        image_data = handle_image_response(result["imageUrl"])
+                        payload = MessageProcessor.create_chat_response(image_data, model, True)
+                        yield f"data: {json.dumps(payload)}\n\n"
+                        
                 except Exception as e:
                     logger.error(f"处理标准流时出错: {str(e)}", "Server")
                     continue
 
             yield "data: [DONE]\n\n"
-        return generate_standard()
+        
+        return generate_standard_fixed()
 def initialization():
     sso_array = os.environ.get("SSO", "").split(',')
     logger.info("开始加载令牌", "Server")
@@ -1718,4 +1733,4 @@ if __name__ == '__main__':
         host='0.0.0.0',
         port=CONFIG["SERVER"]["PORT"],
         debug=False
-        )
+            )
