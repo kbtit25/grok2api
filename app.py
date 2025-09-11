@@ -757,14 +757,11 @@ class Utils:
         if not text or not isinstance(text, str):
             return text
 
-        # 移除 <grok:render ...>...</grok:render> 结构 (用于引用)
-        # flags=re.DOTALL 让 . 可以匹配换行符
-        text = re.sub(r'<grok:render.*?>.*?</grok:render>', '', text, flags=re.DOTALL)
+        # 将匹配到的标签替换为单个空格，以确保文本分隔，并避免破坏格式
+        text = re.sub(r'<grok:render.*?>.*?</grok:render>', ' ', text, flags=re.DOTALL)
+        text = re.sub(r'<xai:tool_usage_card>.*?</xai:tool_usage_card>', ' ', text, flags=re.DOTALL)
         
-        # 移除 <xai:tool_usage_card>...</xai:tool_usage_card> 结构
-        text = re.sub(r'<xai:tool_usage_card>.*?</xai:tool_usage_card>', '', text, flags=re.DOTALL)
-        
-        return text.strip()
+        return text
 
     @staticmethod
     def create_auth_headers(model, is_return=False):
