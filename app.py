@@ -2,6 +2,8 @@ import os
 import json
 import uuid
 import time
+import threading
+import queue
 import base64
 import sys
 import inspect
@@ -759,7 +761,7 @@ class Utils:
 
         # 将匹配到的标签替换为单个空格，以确保文本分隔，并避免破坏格式
         text = re.sub(r'<grok:render.*?>.*?</grok:render>', ' ', text, flags=re.DOTALL)
-        text = re.sub(r'<xai:tool_usage_card>.*?</xai:tool_usage_card>', ' ', text, flags=re.DOTALL)
+        text = re.sub(r'\s*<xai:tool_usage_card>.*?</xai:tool_usage_card>\s*', '', text, flags=re.DOTALL)
         
         return text
 
@@ -813,7 +815,9 @@ class GrokApiClient:
             "mimeType": mime_type,
             "fileName": file_name
         }
+        
     def upload_base64_file(self, message, model):
+        # 这个函数已经是正确的，保持不变，作为参考。
         try:
             message_base64 = base64.b64encode(message.encode('utf-8')).decode('utf-8')
             upload_data = {
@@ -826,7 +830,6 @@ class GrokApiClient:
             cookie = f"{Utils.create_auth_headers(model, True)};{CONFIG['SERVER']['CF_CLEARANCE']}"
             proxy_options = Utils.get_proxy_options()
 
-            # 使用智能重试机制发起文件上传请求
             def make_upload_request(**request_kwargs):
                 return curl_requests.post(
                     "https://grok.com/rest/app-chat/upload-file",
@@ -855,7 +858,8 @@ class GrokApiClient:
         except Exception as error:
             logger.error(str(error), "Server")
             raise Exception(f"上传文件失败,状态码:{response.status_code}")
-    def upload_base64_image(self, base64_data, url):
+
+    def upload_base64_image(self, base64_data, url, model): # 增加了 model 参数
         try:
             if 'data:image' in base64_data:
                 image_buffer = base64_data.split(',')[1]
@@ -866,23 +870,24 @@ class GrokApiClient:
             mime_type = image_info["mimeType"]
             file_name = image_info["fileName"]
 
+            # <<< 核心变更 1: 修正 Payload 结构，移除 rpc 和 req 包装
             upload_data = {
-                "rpc": "uploadFile",
-                "req": {
-                    "fileName": file_name,
-                    "fileMimeType": mime_type,
-                    "content": image_buffer
-                }
+                "fileName": file_name,
+                "fileMimeType": mime_type,
+                "content": image_buffer
             }
 
-            logger.info("发送图片请求", "Server")
+            logger.info("发送图片文件请求", "Server")
 
             proxy_options = Utils.get_proxy_options()
+            # 需要 cookie 来进行认证
+            cookie = f"{Utils.create_auth_headers(model, True)};{CONFIG['SERVER']['CF_CLEARANCE']}"
 
-            # 使用智能重试机制发起图片上传请求
+            # <<< 核心变更 2: 使用智能重试机制发起请求
             def make_image_upload_request(**request_kwargs):
+                # <<< 核心变更 3: 确保使用正确的 URL
                 return curl_requests.post(
-                    url,
+                    url, # URL 将从调用处传入，确保是正确的 /rest/app-chat/upload-file
                     json=upload_data,
                     impersonate="chrome133a",
                     **request_kwargs
@@ -892,13 +897,13 @@ class GrokApiClient:
                 make_image_upload_request,
                 headers={
                     **get_default_headers(),
-                    "Cookie": CONFIG["SERVER"]['COOKIE']
+                    "Cookie": cookie # <<< 核心变更 4: 传入认证 Cookie
                 },
                 **proxy_options
             )
 
             if response.status_code != 200:
-                logger.error(f"上传图片失败,状态码:{response.status_code}", "Server")
+                logger.error(f"上传图片失败,状态码:{response.status_code}, 响应: {response.text}", "Server")
                 return ''
 
             result = response.json()
@@ -906,35 +911,16 @@ class GrokApiClient:
             return result.get("fileMetadataId", "")
 
         except Exception as error:
-            logger.error(str(error), "Server")
+            logger.error(f"上传图片时发生异常: {str(error)}", "Server")
             return ''
-    # def convert_system_messages(self, messages):
-    #     try:
-    #         system_prompt = []
-    #         i = 0
-    #         while i < len(messages):
-    #             if messages[i].get('role') != 'system':
-    #                 break
 
-    #             system_prompt.append(self.process_message_content(messages[i].get('content')))
-    #             i += 1
 
-    #         messages = messages[i:]
-    #         system_prompt = '\n'.join(system_prompt)
-
-    #         if not messages:
-    #             raise ValueError("没有找到用户或者AI消息")
-    #         return {"system_prompt":system_prompt,"messages":messages}
-    #     except Exception as error:
-    #         logger.error(str(error), "Server")
-    #         raise ValueError(error)
     def prepare_chat_request(self, request):
         if ((request["model"] == 'grok-4-imageGen' or request["model"] == 'grok-3-imageGen') and
             not CONFIG["API"]["PICGO_KEY"] and not CONFIG["API"]["TUMY_KEY"] and
             request.get("stream", False)):
             raise ValueError("该模型流式输出需要配置PICGO或者TUMY图床密钥!")
 
-        # system_message, todo_messages = self.convert_system_messages(request["messages"]).values()
         todo_messages = request["messages"]
         if request["model"] in ['grok-4-imageGen', 'grok-3-imageGen', 'grok-3-deepsearch']:
             last_message = todo_messages[-1]
@@ -976,6 +962,7 @@ class GrokApiClient:
                 elif content["type"] == 'text':
                     return remove_think_tags(content["text"])
             return remove_think_tags(self.process_message_content(content))
+            
         for current in todo_messages:
             role = 'assistant' if current["role"] == 'assistant' else 'user'
             is_last_message = current == todo_messages[-1]
@@ -984,16 +971,20 @@ class GrokApiClient:
                 if isinstance(current["content"], list):
                     for item in current["content"]:
                         if item["type"] == 'image_url':
+                            # <<< 核心变更 5: 调用 upload_base64_image 时传入正确的 URL 和 model
                             processed_image = self.upload_base64_image(
                                 item["image_url"]["url"],
-                                f"{CONFIG['API']['BASE_URL']}/api/rpc"
+                                f"{CONFIG['API']['BASE_URL']}/rest/app-chat/upload-file",
+                                request["model"] # 传入 model 用于获取 token
                             )
                             if processed_image:
                                 file_attachments.append(processed_image)
                 elif isinstance(current["content"], dict) and current["content"].get("type") == 'image_url':
+
                     processed_image = self.upload_base64_image(
                         current["content"]["image_url"]["url"],
-                        f"{CONFIG['API']['BASE_URL']}/api/rpc"
+                        f"{CONFIG['API']['BASE_URL']}/rest/app-chat/upload-file",
+                        request["model"] # 传入 model 用于获取 token
                     )
                     if processed_image:
                         file_attachments.append(processed_image)
@@ -1301,18 +1292,29 @@ def handle_non_stream_response(response, model):
 
 def handle_stream_response(response, model):
     
+    # 发送一个 OpenAI 兼容的首块空 delta，初始化客户端解析状态
+    initial_payload = {
+        "id": f"chatcmpl-{uuid.uuid4()}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {"role": "assistant", "content": ""},
+            "finish_reason": None
+        }]
+    }
+    yield f"data: {json.dumps(initial_payload)}\n\n".encode('utf-8')
+
     AGENT_MODELS = ['grok-4-heavy', 'grok-4', 'grok-3-deepersearch', 'grok-3-deepsearch']
 
-    # ================= 分支 A: Agent 模型的专用处理逻辑 =================
     if model in AGENT_MODELS:
         def generate_agent():
             logger.info(f"使用 Agent 模型专用逻辑处理: {model}", "Server")
             stream = response.iter_lines()
-            
             is_in_think_block = False
             final_answer_started = False
 
-            # Agent 模型的内部辅助函数
             def yield_agent_content(content_to_yield, content_type='content'):
                 nonlocal is_in_think_block
                 is_thinking_content = content_type == 'thinking'
@@ -1320,42 +1322,43 @@ def handle_stream_response(response, model):
                 if is_thinking_content and not is_in_think_block:
                     is_in_think_block = True
                     payload = MessageProcessor.create_chat_response('<think>\n', model, True)
-                    yield f"data: {json.dumps(payload)}\n\n"
-                
+                    yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
                 elif not is_thinking_content and is_in_think_block:
                     is_in_think_block = False
                     payload = MessageProcessor.create_chat_response('</think>\n\n', model, True)
-                    json_payload = json.dumps(payload)
-                    yield f"data: {json_payload}\n\n"
+                    yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
 
                 if content_to_yield:
                     payload = MessageProcessor.create_chat_response(content_to_yield, model, True)
-                    yield f"data: {json.dumps(payload)}\n\n"
+                    yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
 
             for chunk in stream:
-                if not chunk: continue
+                if not chunk:
+                    continue
                 try:
                     line_json = json.loads(chunk.decode("utf-8").strip())
-                    if line_json.get("error"): continue
+                    if line_json.get("error"):
+                        continue
 
                     response_data = line_json.get("result", {}).get("response")
-                    if not response_data: continue
-                    
+                    if not response_data:
+                        continue
+
                     if response_data.get("modelResponse") and isinstance(response_data["modelResponse"], dict):
                         final_answer_started = True
                         for part in yield_agent_content(None, content_type='content'):
                             yield part
-                        
                         final_message = response_data["modelResponse"].get("message")
                         if final_message:
                             clean_message = Utils.safe_filter_grok_tags(final_message)
                             payload = MessageProcessor.create_chat_response(clean_message, model, True)
-                            yield f"data: {json.dumps(payload)}\n\n"
+                            yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
                         break
 
                     result = process_model_response(response_data, model)
                     if result.get("type") == 'heartbeat':
-                        yield ":ping\n\n"
+                        # 被动心跳改为注释，避免触发客户端 JSON 解析
+                        yield b": ping\n\n"
                     elif result.get("type") == 'thinking':
                         for part in yield_agent_content(result.get("token"), content_type='thinking'):
                             yield part
@@ -1363,56 +1366,58 @@ def handle_stream_response(response, model):
                 except Exception as e:
                     logger.error(f"处理 Agent 流时出错: {str(e)}", "Server")
                     continue
-            
+
             if is_in_think_block and not final_answer_started:
                 payload = MessageProcessor.create_chat_response('</think>\n\n', model, True)
-                json_payload = json.dumps(payload)
-                yield f"data: {json_payload}\n\n"
+                yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
 
-            yield "data: [DONE]\n\n"
-        return generate_agent()
+            yield b"data: [DONE]\n\n"
 
+        for chunk in generate_agent():
+            yield chunk
 
-    # ================= 分支 B: 标准模型的逻辑 =================
     else:
         def generate_standard_fixed():
             logger.info(f"使用标准模型逻辑处理 (精准模仿作者图片处理): {model}", "Server")
             stream = response.iter_lines()
-
             CONFIG["IS_IMG_GEN"] = False
             CONFIG["IS_IMG_GEN2"] = False
 
             for chunk in stream:
-                if not chunk: continue
+                if not chunk:
+                    continue
                 try:
                     line_json = json.loads(chunk.decode("utf-8").strip())
-                    if line_json.get("error"): continue
+                    if line_json.get("error"):
+                        continue
 
                     response_data = line_json.get("result", {}).get("response")
-                    if not response_data: continue
-                    
+                    if not response_data:
+                        continue
+
                     if response_data.get("doImgGen") or response_data.get("imageAttachmentInfo"):
                         CONFIG["IS_IMG_GEN"] = True
-                    
+
                     result = process_model_response(response_data, model)
 
                     if result.get("token"):
                         payload = MessageProcessor.create_chat_response(result["token"], model, True)
-                        yield f"data: {json.dumps(payload)}\n\n"
+                        yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
 
                     if result.get("imageUrl"):
                         CONFIG["IS_IMG_GEN2"] = True
                         image_data = handle_image_response(result["imageUrl"])
                         payload = MessageProcessor.create_chat_response(image_data, model, True)
-                        yield f"data: {json.dumps(payload)}\n\n"
-                        
+                        yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
+
                 except Exception as e:
                     logger.error(f"处理标准流时出错: {str(e)}", "Server")
                     continue
 
-            yield "data: [DONE]\n\n"
-        
-        return generate_standard_fixed()
+            yield b"data: [DONE]\n\n"
+
+        for chunk in generate_standard_fixed():
+            yield chunk
 def initialization():
     sso_array = os.environ.get("SSO", "").split(',')
     logger.info("开始加载令牌", "Server")
@@ -1572,6 +1577,48 @@ def get_models():
             for model in CONFIG["MODELS"].keys()
         ]
     })
+    
+    
+def stream_with_active_heartbeat(source_stream, interval=10):
+    q = queue.Queue()
+
+    def reader_thread():
+        try:
+            for chunk in source_stream:
+                q.put(chunk)
+        except Exception as e:
+            logger.error(f"源数据流发生错误: {e}", "HeartbeatWrapper")
+            q.put(e)
+        finally:
+            q.put(None)
+
+    thread = threading.Thread(target=reader_thread)
+    thread.daemon = True
+    thread.start()
+
+    # 立刻写首字节 + 2KB 填充（SSE 注释，客户端不会解析为 JSON）
+    yield (":" + (" " * 2048) + "\n").encode('utf-8')
+
+    last_sent = time.monotonic()
+
+    while True:
+        try:
+            timeout = max(0, interval - (time.monotonic() - last_sent))
+            chunk = q.get(timeout=timeout) if timeout > 0 else q.get_nowait()
+
+            if chunk is None:
+                break
+            if isinstance(chunk, Exception):
+                raise chunk
+
+            last_sent = time.monotonic()
+            yield chunk
+
+        except queue.Empty:
+            # 主动心跳用 SSE 注释，避免客户端按 OpenAI chunk 解析
+            logger.info("10秒无响应，发送主动心跳", "HeartbeatWrapper")
+            last_sent = time.monotonic()
+            yield b": keep-alive\n\n"
 
 @app.route('/v1/chat/completions', methods=['POST'])
 def chat_completions():
@@ -1643,9 +1690,27 @@ def chat_completions():
 
                     try:
                         if stream:
-                            return Response(stream_with_context(
-                                handle_stream_response(response, model)),content_type='text/event-stream')
+                            # 1. 创建我们的 SSE 生成器，包含主动心跳和2KB填充
+                            sse_gen = stream_with_active_heartbeat(
+                                handle_stream_response(response, model), 
+                                interval=10
+                            )
+                            
+                            # 2. 创建一个 Response 对象，并设置所有反缓冲头部
+                            resp = Response(
+                                stream_with_context(sse_gen), 
+                                content_type='text/event-stream; charset=utf-8', 
+                                direct_passthrough=True
+                            )
+                            resp.headers['Cache-Control'] = 'no-cache, no-transform'
+                            resp.headers['Connection'] = 'keep-alive'
+                            # 这个头是给 Nginx 用的，如果有的话
+                            resp.headers['X-Accel-Buffering'] = 'no' 
+                            
+                            # 3. 返回配置好的 Response 对象
+                            return resp
                         else:
+                            # 非流式逻辑保持不变
                             content = handle_non_stream_response(response, model)
                             return jsonify(
                                 MessageProcessor.create_chat_response(content, model))
@@ -1718,4 +1783,4 @@ if __name__ == '__main__':
         host='0.0.0.0',
         port=CONFIG["SERVER"]["PORT"],
         debug=False
-            )
+    )
