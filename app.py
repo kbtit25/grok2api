@@ -6,6 +6,7 @@ import base64
 import sys
 import inspect
 import secrets
+import re
 from loguru import logger
 from pathlib import Path
 import uuid
@@ -751,32 +752,16 @@ class Utils:
     @staticmethod
     def safe_filter_grok_tags(text):
         """
-        只移除 <xai:tool_usage_card> 标签
+        移除 Grok 返回内容中的特殊标签，例如引用和工具使用卡片。
         """
         if not text or not isinstance(text, str):
             return text
 
-        start_tag, end_tag = ("<xai:tool_usage_card>", "</xai:tool_usage_card>")
-    
-        if start_tag in text:
-            original_text = text
-            while True:
-                end_index = text.rfind(end_tag)
-                if end_index == -1:
-                    break
-            
-                start_index = text.rfind(start_tag, 0, end_index)
-                if start_index == -1:
-                    break
-            
-                text = text[:start_index] + text[end_index + len(end_tag):]
-            
-            if text != original_text:
-                return text.strip()
-            else:
-                return text
-        else:
-            return text
+        # 将匹配到的标签替换为单个空格，以确保文本分隔，并避免破坏格式
+        text = re.sub(r'<grok:render.*?>.*?</grok:render>', ' ', text, flags=re.DOTALL)
+        text = re.sub(r'<xai:tool_usage_card>.*?</xai:tool_usage_card>', ' ', text, flags=re.DOTALL)
+        
+        return text
 
     @staticmethod
     def create_auth_headers(model, is_return=False):
