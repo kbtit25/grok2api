@@ -732,6 +732,59 @@ def smart_grok_request_with_fallback(request_func, *args, **kwargs):
     return None
 
 class Utils:
+    # 1. 使用 threading.local() 来创建线程安全的存储
+    _local = threading.local()
+
+    @staticmethod
+    def reset_citation_counter():
+        """为当前线程初始化或重置计数器"""
+        Utils._local.citation_counter = 1
+
+    @staticmethod
+    def get_citation_counter():
+        """获取当前线程的计数器值"""
+        # 如果当前线程还没有计数器，就初始化一个
+        if not hasattr(Utils._local, 'citation_counter'):
+            Utils._local.citation_counter = 1
+        return Utils._local.citation_counter
+
+    @staticmethod
+    def increment_citation_counter():
+        """为当前线程的计数器加一"""
+        if not hasattr(Utils._local, 'citation_counter'):
+            Utils._local.citation_counter = 1
+        Utils._local.citation_counter += 1
+
+    @staticmethod
+    def safe_filter_grok_tags(text, citations=None):
+        if not text or not isinstance(text, str):
+            return text
+
+        # 移除工具卡片
+        text = re.sub(r'\s*<xai:tool_usage_card>.*?</xai:tool_usage_card>\s*', '', text, flags=re.DOTALL)
+
+        if citations:
+            # 2. 定义一个内嵌函数来处理替换，它会使用上面线程安全的计数器方法
+            def replace_render_tag(match):
+                card_id = match.group(1)
+                if card_id in citations:
+                    url = citations[card_id]
+                    # 从线程局部存储中获取当前计数
+                    counter = Utils.get_citation_counter()
+                    replacement = f" [信源 {counter}]({url})"
+                    # 增加当前线程的计数
+                    Utils.increment_citation_counter()
+                    return replacement
+                else:
+                    return " [信源信息缺失]"
+            
+            text = re.sub(r'<grok:render.*?card_id="([^"]+)".*?>.*?</grok:render>', replace_render_tag, text, flags=re.DOTALL)
+        else:
+            # 如果没有提供信源字典，就按老方法直接移除标签
+            text = re.sub(r'<grok:render.*?>.*?</grok:render>', ' ', text, flags=re.DOTALL)
+
+        return text
+
     @staticmethod
     def organize_search_results(search_results):
         if not search_results or 'results' not in search_results:
@@ -749,23 +802,7 @@ class Utils:
             formatted_results.append(formatted_result)
 
         return '\n\n'.join(formatted_results)
-
-
-
-    @staticmethod
-    def safe_filter_grok_tags(text):
-        """
-        移除 Grok 返回内容中的特殊标签，例如引用和工具使用卡片。
-        """
-        if not text or not isinstance(text, str):
-            return text
-
-        # 将匹配到的标签替换为单个空格，以确保文本分隔，并避免破坏格式
-        text = re.sub(r'<grok:render.*?>.*?</grok:render>', ' ', text, flags=re.DOTALL)
-        text = re.sub(r'\s*<xai:tool_usage_card>.*?</xai:tool_usage_card>\s*', '', text, flags=re.DOTALL)
         
-        return text
-
     @staticmethod
     def create_auth_headers(model, is_return=False):
         return token_manager.get_next_token_for_model(model, is_return)
@@ -1082,20 +1119,11 @@ class MessageProcessor:
         }
 
 def process_model_response(response, model):
-    """
-    处理来自 Grok API 的流式响应块。
-    此版本精准修复了非 Agent 模型（如 grok-3）会重复输出内容的问题，
-    方法是在接收到最终 modelResponse 块时将其忽略。
-    所有针对 Agent 模型的处理逻辑保持原始状态不变。
-    """
-    result = {"token": None, "type": None}
+    result = {"token": None, "type": None} 
     AGENT_MODELS = ['grok-4-heavy', 'grok-4', 'grok-3-deepersearch', 'grok-3-deepsearch']
 
-    if CONFIG["IS_IMG_GEN"]:
-        if response.get("cachedImageGenerationResponse") and not CONFIG["IS_IMG_GEN2"]:
-            result["imageUrl"] = response["cachedImageGenerationResponse"]["imageUrl"]
-            result["type"] = 'image_url'
-        return result
+    if response.get("cachedImageGenerationResponse"):
+        return result 
 
     message_tag = response.get("messageTag")
     token = response.get("token")
@@ -1110,40 +1138,31 @@ def process_model_response(response, model):
     if response.get("modelResponse") and isinstance(response["modelResponse"], dict):
         final_message = response["modelResponse"].get("message")
         if final_message:
-            result["token"] = Utils.safe_filter_grok_tags(final_message)
+            result["token"] = final_message
             result["type"] = 'content'
         return result
 
+    is_thinking_content = False
     if model in AGENT_MODELS:
-        THINKING_TAGS = {'header', 'summary', 'raw_function_result', 'citedWebSearchResults'}
-        if message_tag in THINKING_TAGS:
-            content_to_filter = None
-            if token: content_to_filter = token
-            elif response.get('webSearchResults') and CONFIG["ISSHOW_SEARCH_RESULTS"]:
-                content_to_filter = Utils.organize_search_results(response['webSearchResults'])
-            
-            if content_to_filter:
-                filtered_content = Utils.safe_filter_grok_tags(content_to_filter)
-                if filtered_content:
-                    result["token"] = filtered_content
-                    result["type"] = 'thinking'
+        THINKING_TAGS = {'header', 'summary', 'raw_function_result', 'citedWebSearchResults', 'tool_usage_card'}
+        if message_tag in THINKING_TAGS or response.get("isThinking") or response.get("messageStepId"):
+            is_thinking_content = True
+    
+    if is_thinking_content:
+        if not CONFIG["SHOW_THINKING"]:
             return result
-
-    if model in AGENT_MODELS:
-        is_verbose_thinking = (response.get("isThinking") or response.get("messageStepId")) and message_tag not in {'header', 'summary'}
-        if is_verbose_thinking:
-            if not CONFIG["SHOW_THINKING"]:
-                result["type"] = 'heartbeat'
-                return result
-            elif token:
-                filtered_token = Utils.safe_filter_grok_tags(token)
-                if filtered_token:
-                    result["token"] = filtered_token
-                    result["type"] = 'thinking'
+        else:
+            content_to_send = token
+            if response.get('webSearchResults') and CONFIG["ISSHOW_SEARCH_RESULTS"]:
+                content_to_send = Utils.organize_search_results(response['webSearchResults'])
+            
+            if content_to_send:
+                result["token"] = content_to_send
+                result["type"] = 'thinking'
             return result
     
-    if model not in AGENT_MODELS and token:
-        result["token"] = Utils.safe_filter_grok_tags(token)
+    if token:
+        result["token"] = token
         result["type"] = 'content'
         return result
 
@@ -1243,70 +1262,74 @@ def handle_image_response(image_url):
             except Exception as error:
                 logger.error(str(error), "Server")
                 return "生图失败，请查看TUMY图床密钥是否设置正确"
-
+                
 def handle_non_stream_response(response, model):
-    try:
-        logger.info("开始处理非流式响应", "Server")
+    logger.info("开始处理非流式响应", "Server")
+    stream = response.iter_lines()
+    full_response = ""
+    final_agent_response = None
+    image_url_found = None
+    citations = {}
 
-        stream = response.iter_lines()
-        full_response = ""
+    AGENT_MODELS = ['grok-4-heavy', 'grok-4', 'grok-3-deepersearch', 'grok-3-deepsearch']
 
-        CONFIG["IS_THINKING"] = False
-        CONFIG["IS_IMG_GEN"] = False
-        CONFIG["IS_IMG_GEN2"] = False
+    for chunk in stream:
+        if not chunk: continue
+        try:
+            line_json = json.loads(chunk.decode("utf-8").strip())
+            if line_json.get("error"): continue
 
-        for chunk in stream:
-            if not chunk:
-                continue
-            try:
-                line_json = json.loads(chunk.decode("utf-8").strip())
-                if line_json.get("error"):
-                    logger.error(json.dumps(line_json, indent=2), "Server")
-                    return json.dumps({"error": "RateLimitError"}) + "\n\n"
+            response_data = line_json.get("result", {}).get("response")
+            if not response_data: continue
 
-                response_data = line_json.get("result", {}).get("response")
-                if not response_data:
-                    continue
+            if "cardAttachment" in response_data and response_data["cardAttachment"].get("jsonData"):
+                try:
+                    card_data = json.loads(response_data["cardAttachment"]["jsonData"])
+                    if card_data.get("id") and card_data.get("url"):
+                        citations[card_data["id"]] = card_data["url"]
+                except json.JSONDecodeError: pass
 
-                if response_data.get("doImgGen") or response_data.get("imageAttachmentInfo"):
-                    CONFIG["IS_IMG_GEN"] = True
+            if "cachedImageGenerationResponse" in response_data:
+                image_url_found = response_data["cachedImageGenerationResponse"].get("imageUrl")
 
-                result = process_model_response(response_data, model)
+            if model in AGENT_MODELS:
+                if response_data.get("modelResponse") and isinstance(response_data["modelResponse"], dict):
+                    final_agent_response = response_data["modelResponse"].get("message", "")
+            else:
+                is_process_info = (
+                    response_data.get("isThinking") or 
+                    response_data.get("messageStepId") or
+                    response_data.get("modelResponse") or
+                    response_data.get("messageTag") not in [None, "final"]
+                )
+                token = response_data.get("token")
+                if token is not None and not is_process_info:
+                    full_response += token
+        
+        except Exception as e:
+            logger.error(f"处理非流式响应行时出错: {str(e)}", "Server")
+            continue
 
-                if result["token"]:
-                    full_response += result["token"]
-
-                if result["imageUrl"]:
-                    CONFIG["IS_IMG_GEN2"] = True
-                    return handle_image_response(result["imageUrl"])
-
-            except json.JSONDecodeError:
-                continue
-            except Exception as e:
-                logger.error(f"处理流式响应行时出错: {str(e)}", "Server")
-                continue
-
-        return full_response
-    except Exception as error:
-        logger.error(str(error), "Server")
-        raise
-
+    if image_url_found:
+        return handle_image_response(image_url_found)
+    
+    if model in AGENT_MODELS and final_agent_response is not None:
+        return Utils.safe_filter_grok_tags(final_agent_response, citations)
+    
+    return Utils.safe_filter_grok_tags(full_response, citations)
 def handle_stream_response(response, model):
     
-    # 发送一个 OpenAI 兼容的首块空 delta，初始化客户端解析状态
+    Utils.reset_citation_counter()
     initial_payload = {
         "id": f"chatcmpl-{uuid.uuid4()}",
         "object": "chat.completion.chunk",
         "created": int(time.time()),
         "model": model,
-        "choices": [{
-            "index": 0,
-            "delta": {"role": "assistant", "content": ""},
-            "finish_reason": None
-        }]
+        "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]
     }
     yield f"data: {json.dumps(initial_payload)}\n\n".encode('utf-8')
 
+    citations = {}
     AGENT_MODELS = ['grok-4-heavy', 'grok-4', 'grok-3-deepersearch', 'grok-3-deepsearch']
 
     if model in AGENT_MODELS:
@@ -1314,112 +1337,101 @@ def handle_stream_response(response, model):
             logger.info(f"使用 Agent 模型专用逻辑处理: {model}", "Server")
             stream = response.iter_lines()
             is_in_think_block = False
-            final_answer_started = False
-
-            def yield_agent_content(content_to_yield, content_type='content'):
-                nonlocal is_in_think_block
-                is_thinking_content = content_type == 'thinking'
-
-                if is_thinking_content and not is_in_think_block:
-                    is_in_think_block = True
-                    payload = MessageProcessor.create_chat_response('<think>\n', model, True)
-                    yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
-                elif not is_thinking_content and is_in_think_block:
-                    is_in_think_block = False
-                    payload = MessageProcessor.create_chat_response('</think>\n\n', model, True)
-                    yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
-
-                if content_to_yield:
-                    payload = MessageProcessor.create_chat_response(content_to_yield, model, True)
-                    yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
 
             for chunk in stream:
-                if not chunk:
-                    continue
+                if not chunk: continue
                 try:
                     line_json = json.loads(chunk.decode("utf-8").strip())
-                    if line_json.get("error"):
-                        continue
-
+                    if line_json.get("error"): continue
                     response_data = line_json.get("result", {}).get("response")
-                    if not response_data:
-                        continue
-
-                    if response_data.get("modelResponse") and isinstance(response_data["modelResponse"], dict):
-                        final_answer_started = True
-                        for part in yield_agent_content(None, content_type='content'):
-                            yield part
-                        final_message = response_data["modelResponse"].get("message")
-                        if final_message:
-                            clean_message = Utils.safe_filter_grok_tags(final_message)
-                            payload = MessageProcessor.create_chat_response(clean_message, model, True)
-                            yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
-                        break
-
+                    if not response_data: continue
+                    if "cardAttachment" in response_data and response_data["cardAttachment"].get("jsonData"):
+                        try:
+                            card_data = json.loads(response_data["cardAttachment"]["jsonData"])
+                            if card_data.get("id") and card_data.get("url"):
+                                citations[card_data["id"]] = card_data["url"]
+                        except json.JSONDecodeError: pass
                     result = process_model_response(response_data, model)
                     if result.get("type") == 'heartbeat':
-                        # 被动心跳改为注释，避免触发客户端 JSON 解析
                         yield b": ping\n\n"
-                    elif result.get("type") == 'thinking':
-                        for part in yield_agent_content(result.get("token"), content_type='thinking'):
-                            yield part
-
+                        continue
+                    if result.get("token") is not None:
+                        if result.get("type") == 'thinking':
+                            if not is_in_think_block:
+                                is_in_think_block = True
+                                payload = MessageProcessor.create_chat_response('<think>\n', model, True)
+                                yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
+                            clean_token = Utils.safe_filter_grok_tags(result["token"], citations)
+                            payload = MessageProcessor.create_chat_response(clean_token, model, True)
+                            yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
+                        elif result.get("type") == 'content':
+                            if is_in_think_block:
+                                is_in_think_block = False
+                                payload = MessageProcessor.create_chat_response('</think>\n\n', model, True)
+                                yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
+                            clean_token = Utils.safe_filter_grok_tags(result["token"], citations)
+                            payload = MessageProcessor.create_chat_response(clean_token, model, True)
+                            yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
                 except Exception as e:
                     logger.error(f"处理 Agent 流时出错: {str(e)}", "Server")
                     continue
-
-            if is_in_think_block and not final_answer_started:
+            if is_in_think_block:
                 payload = MessageProcessor.create_chat_response('</think>\n\n', model, True)
                 yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
-
             yield b"data: [DONE]\n\n"
-
         for chunk in generate_agent():
             yield chunk
-
     else:
         def generate_standard_fixed():
-            logger.info(f"使用标准模型逻辑处理 (精准模仿作者图片处理): {model}", "Server")
+            logger.info(f"使用标准模型逻辑处理 (严格过滤模式): {model}", "Server")
             stream = response.iter_lines()
-            CONFIG["IS_IMG_GEN"] = False
-            CONFIG["IS_IMG_GEN2"] = False
-
+            is_img_gen = False
+            is_img_gen2 = False
             for chunk in stream:
-                if not chunk:
-                    continue
+                if not chunk: continue
                 try:
                     line_json = json.loads(chunk.decode("utf-8").strip())
-                    if line_json.get("error"):
-                        continue
-
+                    if line_json.get("error"): continue
                     response_data = line_json.get("result", {}).get("response")
-                    if not response_data:
-                        continue
-
+                    if not response_data: continue
+                    if "cardAttachment" in response_data and response_data["cardAttachment"].get("jsonData"):
+                        try:
+                            card_data = json.loads(response_data["cardAttachment"]["jsonData"])
+                            if card_data.get("id") and card_data.get("url"):
+                                citations[card_data["id"]] = card_data["url"]
+                        except json.JSONDecodeError: pass
                     if response_data.get("doImgGen") or response_data.get("imageAttachmentInfo"):
-                        CONFIG["IS_IMG_GEN"] = True
-
-                    result = process_model_response(response_data, model)
-
-                    if result.get("token"):
-                        payload = MessageProcessor.create_chat_response(result["token"], model, True)
+                        is_img_gen = True
+                    if "cachedImageGenerationResponse" in response_data and not is_img_gen2:
+                        image_url = response_data["cachedImageGenerationResponse"].get("imageUrl")
+                        if image_url:
+                            is_img_gen2 = True
+                            image_data = handle_image_response(image_url)
+                            payload = MessageProcessor.create_chat_response(image_data, model, True)
+                            yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
+                            break 
+                    if is_img_gen and not is_img_gen2:
+                        continue
+                    
+                    # --- 语法修复点在这里 ---
+                    is_process_info = (
+                        response_data.get("isThinking") or 
+                        response_data.get("messageStepId") or
+                        response_data.get("modelResponse") or
+                        response_data.get("messageTag") not in [None, "final"]
+                    ) # <--- 这个括号之前被我漏掉了
+                    
+                    token = response_data.get("token")
+                    if token is not None and not is_process_info:
+                        clean_token = Utils.safe_filter_grok_tags(token, citations)
+                        payload = MessageProcessor.create_chat_response(clean_token, model, True)
                         yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
-
-                    if result.get("imageUrl"):
-                        CONFIG["IS_IMG_GEN2"] = True
-                        image_data = handle_image_response(result["imageUrl"])
-                        payload = MessageProcessor.create_chat_response(image_data, model, True)
-                        yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
-
                 except Exception as e:
                     logger.error(f"处理标准流时出错: {str(e)}", "Server")
                     continue
-
             yield b"data: [DONE]\n\n"
-
         for chunk in generate_standard_fixed():
             yield chunk
-# 替换你的 initialization 函数
 def initialization():
     sso_array = os.environ.get("SSO", "").split(',')
     sso_heavy_array = os.environ.get("SSO_HEAVY", "").split(',') # 新增 heavy sso 环境变量
@@ -1592,7 +1604,7 @@ def get_models():
     })
     
     
-def stream_with_active_heartbeat(source_stream, interval=10):
+def stream_with_active_heartbeat(source_stream, interval=30):
     q = queue.Queue()
 
     def reader_thread():
@@ -1629,7 +1641,7 @@ def stream_with_active_heartbeat(source_stream, interval=10):
 
         except queue.Empty:
             # 主动心跳用 SSE 注释，避免客户端按 OpenAI chunk 解析
-            logger.info("10秒无响应，发送主动心跳", "HeartbeatWrapper")
+            logger.info("30秒无响应，发送主动心跳", "HeartbeatWrapper")
             last_sent = time.monotonic()
             yield b": keep-alive\n\n"
 
@@ -1762,4 +1774,4 @@ if __name__ == '__main__':
         host='0.0.0.0',
         port=CONFIG["SERVER"]["PORT"],
         debug=False
-)
+            )
