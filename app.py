@@ -148,13 +148,13 @@ CONFIG = {
         'grok-4-heavy': 'grok-4-heavy',
         'grok-4': 'grok-4',
         'grok-4-imageGen': 'grok-4',
-        'grok-4-search': 'grok-4',
+        #'grok-4-search': 'grok-4',
         "grok-3": "grok-3",
-        "grok-3-search": "grok-3",
+        #"grok-3-search": "grok-3",
         "grok-3-imageGen": "grok-3",
-        "grok-3-deepsearch": "grok-3",
-        "grok-3-deepersearch": "grok-3",
-        "grok-3-reasoning": "grok-3"
+        #"grok-3-deepsearch": "grok-3",
+        #"grok-3-deepersearch": "grok-3",
+        #"grok-3-reasoning": "grok-3"
     },
     "API": {
         "IS_TEMP_CONVERSATION": os.environ.get("IS_TEMP_CONVERSATION", "true").lower() == "true",
@@ -344,41 +344,40 @@ def get_default_headers(force_refresh_statsig=False):
 # 为了向后兼容，保留 DEFAULT_HEADERS 变量
 DEFAULT_HEADERS = get_default_headers()
 
+# 替换你现有的 AuthTokenManager 类
 class AuthTokenManager:
     def __init__(self):
         self.token_model_map = {}
         self.expired_tokens = set()
         self.token_status_map = {}
-
-        self.model_config = {
-            "grok-4": {
-                "RequestFrequency": 20,
-                "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
-            },
-            "grok-3": {
-                "RequestFrequency": 30,
-                "ExpirationTime": 2 * 60 * 60 * 1000  # 2小时
-            },
-            "grok-3-deepsearch": {
-                "RequestFrequency": 30,
-                "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
-            },
-            "grok-3-deepersearch": {
-                "RequestFrequency": 30,
-                "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
-            },
-            "grok-3-reasoning": {
-                "RequestFrequency": 30,
-                "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
-            },
-            "grok-4-heavy": {
-                "RequestFrequency": 20,
-                "ExpirationTime": 24 * 60 * 60 * 1000  # 24小时
-            }
+        
+        # 1. 定义不同等级的配置
+        # 普通账号配置 (你可以根据需要调整)
+        self.model_normal_config = {
+            "grok-4":              { "RequestFrequency": 20, "ExpirationTime": 24 * 60 * 60 * 1000 },
+            "grok-3":              { "RequestFrequency": 30, "ExpirationTime": 2 * 60 * 60 * 1000 },
+            #"grok-3-deepsearch":   { "RequestFrequency": 10, "ExpirationTime": 24 * 60 * 60 * 1000 },
+            #"grok-3-deepersearch": { "RequestFrequency": 5, "ExpirationTime": 24 * 60 * 60 * 1000 },
+            #"grok-3-reasoning":    { "RequestFrequency": 8, "ExpirationTime": 24 * 60 * 60 * 1000 }
         }
+        
+        # Heavy 账号配置 (你可以根据需要调整)
+        self.model_heavy_config = {
+            # Heavy 账号可以访问所有普通模型，且次数更多
+            "grok-4":              { "RequestFrequency": 100, "ExpirationTime": 24 * 60 * 60 * 1000 },
+            "grok-3":              { "RequestFrequency": 150, "ExpirationTime": 2 * 60 * 60 * 1000 },
+            #"grok-3-deepsearch":   { "RequestFrequency": 50,  "ExpirationTime": 24 * 60 * 60 * 1000 },
+            #"grok-3-deepersearch": { "RequestFrequency": 25,  "ExpirationTime": 24 * 60 * 60 * 1000 },
+            #"grok-3-reasoning":    { "RequestFrequency": 40,  "ExpirationTime": 24 * 60 * 60 * 1000 },
+            # 只有 Heavy 账号可以访问 heavy 模型
+            "grok-4-heavy":        { "RequestFrequency": 20,  "ExpirationTime": 24 * 60 * 60 * 1000 }
+        }
+
         self.token_reset_switch = False
         self.token_reset_timer = None
-        self.load_token_status() # 加载令牌状态
+        self.load_token_status()
+
+
     def save_token_status(self):
         try:        
             with open(CONFIG["TOKEN_STATUS_FILE"], 'w', encoding='utf-8') as f:
@@ -396,47 +395,60 @@ class AuthTokenManager:
                 logger.info("已从配置文件加载令牌状态", "TokenManager")
         except Exception as error:
             logger.error(f"加载令牌状态失败: {str(error)}", "TokenManager")
-    def add_token(self, token,isinitialization=False):
+    
+    # 修改 add_token 以支持分组
+    def add_token(self, token, token_type="normal", isinitialization=False):
         sso = token.split("sso=")[1].split(";")[0]
-        for model in self.model_config.keys():
+        
+        config_to_use = self.model_heavy_config if token_type == "heavy" else self.model_normal_config
+        models_to_add = config_to_use.keys()
+
+        for model in models_to_add:
             if model not in self.token_model_map:
                 self.token_model_map[model] = []
             if sso not in self.token_status_map:
                 self.token_status_map[sso] = {}
 
-            existing_token_entry = next((entry for entry in self.token_model_map[model] if entry["token"] == token), None)
+            if any(entry["token"] == token for entry in self.token_model_map[model]):
+                continue
 
-            if not existing_token_entry:
-                self.token_model_map[model].append({
-                    "token": token,
-                    "RequestCount": 0,
-                    "AddedTime": int(time.time() * 1000),
-                    "StartCallTime": None
-                })
+            self.token_model_map[model].append({
+                "token": token,
+                "RequestCount": 0,
+                "AddedTime": int(time.time() * 1000),
+                "StartCallTime": None,
+                "type": token_type
+            })
 
-                if model not in self.token_status_map[sso]:
-                    self.token_status_map[sso][model] = {
-                        "isValid": True,
-                        "invalidatedTime": None,
-                        "totalRequestCount": 0
-                    }
+            if model not in self.token_status_map[sso]:
+                self.token_status_map[sso][model] = {
+                    "isValid": True,
+                    "invalidatedTime": None,
+                    "totalRequestCount": 0,
+                    "type": token_type
+                }
         if not isinitialization:
             self.save_token_status()
 
-    def set_token(self, token):
-        models = list(self.model_config.keys())
+    # set_token 也需要适应分组逻辑 (虽然 chat_completions 没用，但保持完整)
+    def set_token(self, token, token_type="normal"):
+        config_to_use = self.model_heavy_config if token_type == "heavy" else self.model_normal_config
+        models = list(config_to_use.keys())
+        
         self.token_model_map = {model: [{
             "token": token,
             "RequestCount": 0,
             "AddedTime": int(time.time() * 1000),
-            "StartCallTime": None
+            "StartCallTime": None,
+            "type": token_type
         }] for model in models}
 
         sso = token.split("sso=")[1].split(";")[0]
         self.token_status_map[sso] = {model: {
             "isValid": True,
             "invalidatedTime": None,
-            "totalRequestCount": 0
+            "totalRequestCount": 0,
+            "type": token_type
         } for model in models}
 
     def delete_token(self, token):
@@ -449,45 +461,33 @@ class AuthTokenManager:
                 del self.token_status_map[sso]
             
             self.save_token_status()
-
             logger.info(f"令牌已成功移除: {token}", "TokenManager")
             return True
         except Exception as error:
             logger.error(f"令牌删除失败: {str(error)}")
             return False
+
     def reduce_token_request_count(self, model_id, count):
         try:
             normalized_model = self.normalize_model_name(model_id)
-            
-            if normalized_model not in self.token_model_map:
-                logger.error(f"模型 {normalized_model} 不存在", "TokenManager")
-                return False
-                
-            if not self.token_model_map[normalized_model]:
-                logger.error(f"模型 {normalized_model} 没有可用的token", "TokenManager")
+            if normalized_model not in self.token_model_map or not self.token_model_map[normalized_model]:
                 return False
                 
             token_entry = self.token_model_map[normalized_model][0]
-            
-            # 确保RequestCount不会小于0
             new_count = max(0, token_entry["RequestCount"] - count)
             reduction = token_entry["RequestCount"] - new_count
-            
             token_entry["RequestCount"] = new_count
             
-            # 更新token状态
             if token_entry["token"]:
                 sso = token_entry["token"].split("sso=")[1].split(";")[0]
                 if sso in self.token_status_map and normalized_model in self.token_status_map[sso]:
                     self.token_status_map[sso][normalized_model]["totalRequestCount"] = max(
-                        0, 
-                        self.token_status_map[sso][normalized_model]["totalRequestCount"] - reduction
-                    )
+                        0, self.token_status_map[sso][normalized_model]["totalRequestCount"] - reduction)
             return True
-            
         except Exception as error:
             logger.error(f"重置校对token请求次数时发生错误: {str(error)}", "TokenManager")
             return False
+
     def get_next_token_for_model(self, model_id, is_return=False):
         normalized_model = self.normalize_model_name(model_id)
 
@@ -495,69 +495,71 @@ class AuthTokenManager:
             return None
 
         token_entry = self.token_model_map[normalized_model][0]
+        
         if is_return:
             return token_entry["token"]
 
-        if token_entry:
-            if token_entry["StartCallTime"] is None:
-                token_entry["StartCallTime"] = int(time.time() * 1000)
+        config_to_use = self.model_heavy_config if token_entry.get("type") == "heavy" else self.model_normal_config
+        
+        if normalized_model not in config_to_use:
+            logger.error(f"模型 {normalized_model} 不在类型为 '{token_entry.get('type')}' 的配置中", "TokenManager")
+            self.remove_token_from_model(normalized_model, token_entry["token"])
+            return self.get_next_token_for_model(model_id, is_return)
 
-            if not self.token_reset_switch:
-                self.start_token_reset_process()
-                self.token_reset_switch = True
+        model_config = config_to_use[normalized_model]
+        
+        if token_entry.get("StartCallTime") is None:
+            token_entry["StartCallTime"] = int(time.time() * 1000)
 
-            token_entry["RequestCount"] += 1
+        if not self.token_reset_switch:
+            self.start_token_reset_process()
+            self.token_reset_switch = True
 
-            if token_entry["RequestCount"] > self.model_config[normalized_model]["RequestFrequency"]:
-                self.remove_token_from_model(normalized_model, token_entry["token"])
-                next_token_entry = self.token_model_map[normalized_model][0] if self.token_model_map[normalized_model] else None
-                return next_token_entry["token"] if next_token_entry else None
+        token_entry["RequestCount"] += 1
 
-            sso = token_entry["token"].split("sso=")[1].split(";")[0]
-            if sso in self.token_status_map and normalized_model in self.token_status_map[sso]:
-                if token_entry["RequestCount"] == self.model_config[normalized_model]["RequestFrequency"]:
-                    self.token_status_map[sso][normalized_model]["isValid"] = False
-                    self.token_status_map[sso][normalized_model]["invalidatedTime"] = int(time.time() * 1000)
-                self.token_status_map[sso][normalized_model]["totalRequestCount"] += 1
+        if token_entry["RequestCount"] > model_config["RequestFrequency"]:
+            self.remove_token_from_model(normalized_model, token_entry["token"])
+            next_list = self.token_model_map.get(normalized_model, [])
+            return next_list[0]["token"] if next_list else None
 
-                self.save_token_status()
-
-            return token_entry["token"]
-
-        return None
+        sso = token_entry["token"].split("sso=")[1].split(";")[0]
+        if sso in self.token_status_map and normalized_model in self.token_status_map[sso]:
+            self.token_status_map[sso][normalized_model]["totalRequestCount"] += 1
+            if token_entry["RequestCount"] >= model_config["RequestFrequency"]:
+                 self.token_status_map[sso][normalized_model]["isValid"] = False
+                 self.token_status_map[sso][normalized_model]["invalidatedTime"] = int(time.time() * 1000)
+        
+        self.save_token_status()
+        return token_entry["token"]
 
     def remove_token_from_model(self, model_id, token):
         normalized_model = self.normalize_model_name(model_id)
-
-        if normalized_model not in self.token_model_map:
-            logger.error(f"模型 {normalized_model} 不存在", "TokenManager")
-            return False
+        if normalized_model not in self.token_model_map: return False
 
         model_tokens = self.token_model_map[normalized_model]
-        token_index = next((i for i, entry in enumerate(model_tokens) if entry["token"] == token), -1)
-
+        token_index = -1
+        for i, entry in enumerate(model_tokens):
+            if entry["token"] == token:
+                token_index = i
+                break
+        
         if token_index != -1:
-            removed_token_entry = model_tokens.pop(token_index)
-            self.expired_tokens.add((
-                removed_token_entry["token"],
-                normalized_model,
-                int(time.time() * 1000)
-            ))
-
-            if not self.token_reset_switch:
-                self.start_token_reset_process()
-                self.token_reset_switch = True
-
-            logger.info(f"模型{model_id}的令牌已失效，已成功移除令牌: {token}", "TokenManager")
+            removed_entry = model_tokens.pop(token_index)
+            self.expired_tokens.add(
+                (removed_entry["token"], normalized_model, int(time.time() * 1000), removed_entry.get("type", "normal"))
+            )
+            logger.info(f"模型 {model_id} 的令牌 {token} 已失效并移入冷却池。", "TokenManager")
             return True
-
-        logger.error(f"在模型 {normalized_model} 中未找到 token: {token}", "TokenManager")
         return False
 
     def get_expired_tokens(self):
         return list(self.expired_tokens)
 
+    # --- 以下是你版本中独有的、必须保留的辅助方法 ---
     def normalize_model_name(self, model):
+        # grok-4-heavy 必须被正确处理，不能被 normalize 成 grok-4
+        if model == 'grok-4-heavy':
+            return model
         if model.startswith('grok-') and 'deepsearch' not in model and 'reasoning' not in model:
             return '-'.join(model.split('-')[:2])
         return model
@@ -568,16 +570,23 @@ class AuthTokenManager:
 
     def get_remaining_token_request_capacity(self):
         remaining_capacity_map = {}
-
-        for model in self.model_config.keys():
+        all_configs = {**self.model_normal_config, **self.model_heavy_config}
+        
+        for model in all_configs.keys():
             model_tokens = self.token_model_map.get(model, [])
-            model_request_frequency = self.model_config[model]["RequestFrequency"]
-
-            total_used_requests = sum(token_entry.get("RequestCount", 0) for token_entry in model_tokens)
-
-            remaining_capacity = (len(model_tokens) * model_request_frequency) - total_used_requests
-            remaining_capacity_map[model] = max(0, remaining_capacity)
-
+            if not model_tokens:
+                remaining_capacity_map[model] = 0
+                continue
+                
+            total_capacity = 0
+            for entry in model_tokens:
+                config_to_use = self.model_heavy_config if entry.get("type") == "heavy" else self.model_normal_config
+                if model in config_to_use:
+                    total_capacity += config_to_use[model]["RequestFrequency"]
+            
+            total_used_requests = sum(entry.get("RequestCount", 0) for entry in model_tokens)
+            remaining_capacity_map[model] = max(0, total_capacity - total_used_requests)
+            
         return remaining_capacity_map
 
     def get_token_array_for_model(self, model_id):
@@ -587,22 +596,22 @@ class AuthTokenManager:
     def start_token_reset_process(self):
         def reset_expired_tokens():
             now = int(time.time() * 1000)
-
             tokens_to_remove = set()
+            
             for token_info in self.expired_tokens:
-                token, model, expired_time = token_info
-                expiration_time = self.model_config[model]["ExpirationTime"]
+                token, model, expired_time, token_type = token_info
+                
+                config_to_use = self.model_heavy_config if token_type == "heavy" else self.model_normal_config
+                if model not in config_to_use: continue
+                
+                expiration_time = config_to_use[model]["ExpirationTime"]
 
                 if now - expired_time >= expiration_time:
-                    if not any(entry["token"] == token for entry in self.token_model_map.get(model, [])):
-                        if model not in self.token_model_map:
-                            self.token_model_map[model] = []
-
+                    if model not in self.token_model_map: self.token_model_map[model] = []
+                    if not any(e["token"] == token for e in self.token_model_map[model]):
                         self.token_model_map[model].append({
-                            "token": token,
-                            "RequestCount": 0,
-                            "AddedTime": now,
-                            "StartCallTime": None
+                            "token": token, "RequestCount": 0, "AddedTime": now,
+                            "StartCallTime": None, "type": token_type
                         })
 
                     sso = token.split("sso=")[1].split(";")[0]
@@ -610,39 +619,31 @@ class AuthTokenManager:
                         self.token_status_map[sso][model]["isValid"] = True
                         self.token_status_map[sso][model]["invalidatedTime"] = None
                         self.token_status_map[sso][model]["totalRequestCount"] = 0
-
+                    
                     tokens_to_remove.add(token_info)
 
             self.expired_tokens -= tokens_to_remove
 
-            for model in self.model_config.keys():
-                if model not in self.token_model_map:
-                    continue
-
-                for token_entry in self.token_model_map[model]:
-                    if not token_entry.get("StartCallTime"):
-                        continue
-
-                    expiration_time = self.model_config[model]["ExpirationTime"]
-                    if now - token_entry["StartCallTime"] >= expiration_time:
-                        sso = token_entry["token"].split("sso=")[1].split(";")[0]
+            all_configs = {**self.model_normal_config, **self.model_heavy_config}
+            for model, tokens in self.token_model_map.items():
+                if model not in all_configs: continue
+                expiration_time = all_configs[model]["ExpirationTime"]
+                for entry in tokens:
+                    if entry.get("StartCallTime") and now - entry["StartCallTime"] >= expiration_time:
+                        entry["RequestCount"] = 0
+                        entry["StartCallTime"] = None
+                        sso = entry["token"].split("sso=")[1].split(";")[0]
                         if sso in self.token_status_map and model in self.token_status_map[sso]:
-                            self.token_status_map[sso][model]["isValid"] = True
-                            self.token_status_map[sso][model]["invalidatedTime"] = None
-                            self.token_status_map[sso][model]["totalRequestCount"] = 0
-
-                        token_entry["RequestCount"] = 0
-                        token_entry["StartCallTime"] = None
+                           self.token_status_map[sso][model]["isValid"] = True
+                           self.token_status_map[sso][model]["invalidatedTime"] = None
+                           self.token_status_map[sso][model]["totalRequestCount"] = 0
 
         import threading
-        # 启动一个线程执行定时任务，每小时执行一次
         def run_timer():
             while True:
                 reset_expired_tokens()
                 time.sleep(3600)
-
-        timer_thread = threading.Thread(target=run_timer)
-        timer_thread.daemon = True
+        timer_thread = threading.Thread(target=run_timer, daemon=True)
         timer_thread.start()
 
     def get_all_tokens(self):
@@ -651,17 +652,17 @@ class AuthTokenManager:
             for entry in model_tokens:
                 all_tokens.add(entry["token"])
         return list(all_tokens)
+
     def get_current_token(self, model_id):
         normalized_model = self.normalize_model_name(model_id)
-
         if normalized_model not in self.token_model_map or not self.token_model_map[normalized_model]:
             return None
-
-        token_entry = self.token_model_map[normalized_model][0]
-        return token_entry["token"]
+        return self.token_model_map[normalized_model][0]["token"]
 
     def get_token_status_map(self):
         return self.token_status_map
+
+
 
 def smart_grok_request_with_fallback(request_func, *args, **kwargs):
     """
@@ -1418,28 +1419,40 @@ def handle_stream_response(response, model):
 
         for chunk in generate_standard_fixed():
             yield chunk
+# 替换你的 initialization 函数
 def initialization():
     sso_array = os.environ.get("SSO", "").split(',')
+    sso_heavy_array = os.environ.get("SSO_HEAVY", "").split(',') # 新增 heavy sso 环境变量
+
     logger.info("开始加载令牌", "Server")
     token_manager.load_token_status()
+    
     for sso in sso_array:
         if sso:
-            token_manager.add_token(f"sso-rw={sso};sso={sso}",True)
+            token_manager.add_token(f"sso-rw={sso};sso={sso}", token_type="normal", isinitialization=True)
+            
+    for sso in sso_heavy_array:
+        if sso:
+            token_manager.add_token(f"sso-rw={sso};sso={sso}", token_type="heavy", isinitialization=True)
+
     token_manager.save_token_status()
 
-    logger.info(f"成功加载令牌: {json.dumps(token_manager.get_all_tokens(), indent=2)}", "Server")
-    logger.info(f"令牌加载完成，共加载: {len(token_manager.get_all_tokens())}个令牌", "Server")
+    all_tokens = token_manager.get_all_tokens() # 假设你有一个 get_all_tokens 方法
+    logger.info(f"成功加载令牌: {json.dumps(all_tokens, indent=2)}", "Server")
+    logger.info(f"令牌加载完成，共加载: {len(all_tokens)}个令牌", "Server")
 
     if CONFIG["API"]["PROXY"]:
         logger.info(f"代理已设置: {CONFIG['API']['PROXY']}", "Server")
 
-logger.info("初始化完成", "Server")
 
+token_manager = AuthTokenManager()
+initialization()
 
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY') or secrets.token_hex(16)
 app.json.sort_keys = False
+
 
 @app.route('/manager/login', methods=['GET', 'POST'])
 def manager_login():
@@ -1624,53 +1637,61 @@ def stream_with_active_heartbeat(source_stream, interval=10):
 def chat_completions():
     response_status_code = 500
     try:
-        auth_token = request.headers.get('Authorization',
-                                         '').replace('Bearer ', '')
+        # --- 认证逻辑 (与你的版本完全不变) ---
+        auth_token = request.headers.get('Authorization', '').replace('Bearer ', '')
         if auth_token:
             if CONFIG["API"]["IS_CUSTOM_SSO"]:
                 result = f"sso={auth_token};sso-rw={auth_token}"
-                token_manager.set_token(result)
+                token_manager.set_token(result) # 注意：自定义SSO模式会覆盖分组逻辑
             elif auth_token != CONFIG["API"]["API_KEY"]:
                 return jsonify({"error": 'Unauthorized'}), 401
         else:
             return jsonify({"error": 'API_KEY缺失'}), 401
 
+        # --- 数据准备 (与你的版本完全不变) ---
         data = request.json
         model = data.get("model")
         stream = data.get("stream", False)
 
-        retry_count = 0
         grok_client = GrokApiClient(model)
         request_payload = grok_client.prepare_chat_request(data)
-        logger.info(json.dumps(request_payload,indent=2))
+        logger.info(f"为模型 {model} 准备的请求体: {json.dumps(request_payload, indent=2)}", "ChatAPI")
+        
+        # --- 核心修改：引入带上限的试错循环 ---
+        MAX_SWITCH_ATTEMPTS = 5 
 
-        while retry_count < CONFIG["RETRY"]["MAX_ATTEMPTS"]:
-            retry_count += 1
-            CONFIG["API"]["SIGNATURE_COOKIE"] = Utils.create_auth_headers(model)
+        for attempt in range(MAX_SWITCH_ATTEMPTS):
+            # 1. "偷看"一下当前将要使用的SSO，方便日志记录和出错时移除
+            current_sso_cookie = token_manager.get_next_token_for_model(model, is_return=True)
+            
+            if not current_sso_cookie:
+                raise ValueError(f'模型 {model} 已无可用令牌可供尝试。')
 
-            if not CONFIG["API"]["SIGNATURE_COOKIE"]:
-                raise ValueError('该模型无可用令牌')
+            logger.info(f"第 {attempt + 1}/{MAX_SWITCH_ATTEMPTS} 次尝试，准备使用 SSO: {current_sso_cookie.split(';')[1]}", "ChatAPI")
 
-            logger.info(
-                f"当前令牌: {json.dumps(CONFIG['API']['SIGNATURE_COOKIE'], indent=2)}","Server")
-            logger.info(
-                f"当前可用模型的全部可用数量: {json.dumps(token_manager.get_remaining_token_request_capacity(), indent=2)}","Server")
+            # 2. 正式获取SSO并消耗一次计数
+            CONFIG["API"]["SIGNATURE_COOKIE"] = token_manager.get_next_token_for_model(model)
+
+            # --- 准备请求 (这部分是从你的版本里移到循环内部的) ---
+            logger.info(f"当前令牌: {json.dumps(CONFIG['API']['SIGNATURE_COOKIE'], indent=2)}", "Server")
+            logger.info(f"当前可用模型的全部可用数量: {json.dumps(token_manager.get_remaining_token_request_capacity(), indent=2)}", "Server")
             
             if CONFIG['SERVER']['CF_CLEARANCE']:
                 CONFIG["SERVER"]['COOKIE'] = f"{CONFIG['API']['SIGNATURE_COOKIE']};{CONFIG['SERVER']['CF_CLEARANCE']}" 
             else:
                 CONFIG["SERVER"]['COOKIE'] = CONFIG['API']['SIGNATURE_COOKIE']
-            logger.info(json.dumps(request_payload,indent=2),"Server")
+
             try:
                 proxy_options = Utils.get_proxy_options()
 
-                # 使用智能重试机制发起请求
+                # --- 发起请求 (与你的版本完全不变) ---
                 def make_grok_request(**request_kwargs):
                     return curl_requests.post(
                         f"{CONFIG['API']['BASE_URL']}/rest/app-chat/conversations/new",
                         data=json.dumps(request_payload),
                         impersonate="chrome133a",
                         stream=True,
+                        timeout=(10, 1200), # 加上我们之前讨论的防超时设置
                         **request_kwargs
                     )
 
@@ -1682,94 +1703,52 @@ def chat_completions():
                     },
                     **proxy_options
                 )
-                logger.info(CONFIG["SERVER"]['COOKIE'],"Server")
+                
+                logger.info(f"使用 Cookie: {CONFIG['SERVER']['COOKIE']} 发起请求", "Server")
+
+                # 3. --- 结果判断与处理 ---
                 if response.status_code == 200:
                     response_status_code = 200
-                    logger.info("请求成功", "Server")
-                    logger.info(f"当前{model}剩余可用令牌数: {token_manager.get_token_count_for_model(model)}","Server")
+                    logger.info(f"SSO {current_sso_cookie.split(';')[1]} 请求成功。当前模型剩余可用令牌数: {token_manager.get_token_count_for_model(model)}", "Server")
+                    
+                    # 请求成功，处理响应并立即返回，结束整个函数
+                    if stream:
+                        # (这里的代码是我们之前修复好的，带主动心跳和反缓冲头的版本)
+                        sse_gen = stream_with_active_heartbeat(handle_stream_response(response, model), interval=10)
+                        resp = Response(stream_with_context(sse_gen), content_type='text/event-stream; charset=utf-8', direct_passthrough=True)
+                        resp.headers['Cache-Control'] = 'no-cache, no-transform'
+                        resp.headers['Connection'] = 'keep-alive'
+                        resp.headers['X-Accel-Buffering'] = 'no'
+                        return resp
+                    else:
+                        content = handle_non_stream_response(response, model)
+                        return jsonify(MessageProcessor.create_chat_response(content, model))
 
-                    try:
-                        if stream:
-                            # 1. 创建我们的 SSE 生成器，包含主动心跳和2KB填充
-                            sse_gen = stream_with_active_heartbeat(
-                                handle_stream_response(response, model), 
-                                interval=10
-                            )
-                            
-                            # 2. 创建一个 Response 对象，并设置所有反缓冲头部
-                            resp = Response(
-                                stream_with_context(sse_gen), 
-                                content_type='text/event-stream; charset=utf-8', 
-                                direct_passthrough=True
-                            )
-                            resp.headers['Cache-Control'] = 'no-cache, no-transform'
-                            resp.headers['Connection'] = 'keep-alive'
-                            # 这个头是给 Nginx 用的，如果有的话
-                            resp.headers['X-Accel-Buffering'] = 'no' 
-                            
-                            # 3. 返回配置好的 Response 对象
-                            return resp
-                        else:
-                            # 非流式逻辑保持不变
-                            content = handle_non_stream_response(response, model)
-                            return jsonify(
-                                MessageProcessor.create_chat_response(content, model))
-
-                    except Exception as error:
-                        logger.error(str(error), "Server")
-                        if CONFIG["API"]["IS_CUSTOM_SSO"]:
-                            raise ValueError(f"自定义SSO令牌当前模型{model}的请求次数已失效")
-                        token_manager.remove_token_from_model(model, CONFIG["API"]["SIGNATURE_COOKIE"])
-                        if token_manager.get_token_count_for_model(model) == 0:
-                            raise ValueError(f"{model} 次数已达上限，请切换其他模型或者重新对话")
-                elif response.status_code == 403:
-                    response_status_code = 403
-                    token_manager.reduce_token_request_count(model,1)#重置去除当前因为错误未成功请求的次数，确保不会因为错误未成功请求的次数导致次数上限
-                    if token_manager.get_token_count_for_model(model) == 0:
-                        raise ValueError(f"{model} 次数已达上限，请切换其他模型或者重新对话")
-                    print("状态码:", response.status_code)
-                    print("响应头:", response.headers)
-                    print("响应内容:", response.text)
-                    raise ValueError(f"IP暂时被封无法破盾，请稍后重试或者更换ip")
-                elif response.status_code == 429:
-                    response_status_code = 429
-                    token_manager.reduce_token_request_count(model,1)
-                    if CONFIG["API"]["IS_CUSTOM_SSO"]:
-                        raise ValueError(f"自定义SSO令牌当前模型{model}的请求次数已失效")
-
-                    token_manager.remove_token_from_model(
-                        model, CONFIG["API"]["SIGNATURE_COOKIE"])
-                    if token_manager.get_token_count_for_model(model) == 0:
-                        raise ValueError(f"{model} 次数已达上限，请切换其他模型或者重新对话")
-
-                else:
-                    if CONFIG["API"]["IS_CUSTOM_SSO"]:
-                        raise ValueError(f"自定义SSO令牌当前模型{model}的请求次数已失效")
-
-                    logger.error(f"令牌异常错误状态!status: {response.status_code}","Server")
-                    token_manager.remove_token_from_model(model, CONFIG["API"]["SIGNATURE_COOKIE"])
-                    logger.info(
-                        f"当前{model}剩余可用令牌数: {token_manager.get_token_count_for_model(model)}",
-                        "Server")
-
+                # 如果请求失败，则记录日志，将当前SSO移入冷却池，然后进入下一次循环
+                logger.warning(
+                    f"SSO {current_sso_cookie.split(';')[1]} 请求失败 (状态码: {response.status_code})，将移入冷却池并尝试下一个。",
+                    "ChatAPI"
+                )
+                token_manager.remove_token_from_model(model, current_sso_cookie)
+                # continue 会自动进入 for 循环的下一次迭代
+            
             except Exception as e:
-                logger.error(f"请求处理异常: {str(e)}", "Server")
-                if CONFIG["API"]["IS_CUSTOM_SSO"]:
-                    raise
-                continue
-        if response_status_code == 403:
-            raise ValueError('IP暂时被封无法破盾，请稍后重试或者更换ip')
-        elif response_status_code == 500:
-            raise ValueError('当前模型所有令牌暂无可用，请稍后重试')    
+                logger.error(f"SSO {current_sso_cookie.split(';')[1]} 遭遇请求异常: {e}，将移入冷却池并尝试下一个。", "ChatAPI")
+                token_manager.remove_token_from_model(model, current_sso_cookie)
+                # continue 会自动进入 for 循环的下一次迭代
+        
+        # 如果 for 循环执行了 5 次都失败了，就会走到这里
+        raise ValueError(f'已连续尝试 {MAX_SWITCH_ATTEMPTS} 个不同 SSO 均失败，请稍后重试或检查 SSO 池状态。')
 
     except Exception as error:
         logger.error(str(error), "ChatAPI")
+        # 如果是认证错误或我们主动抛出的错误，可以用 400/500，否则用 500
+        status_code_to_return = response_status_code if 'response_status_code' in locals() and response_status_code != 200 else 500
         return jsonify(
             {"error": {
                 "message": str(error),
                 "type": "server_error"
-            }}), response_status_code
-
+            }}), status_code_to_return
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def catch_all(path):
@@ -1783,4 +1762,4 @@ if __name__ == '__main__':
         host='0.0.0.0',
         port=CONFIG["SERVER"]["PORT"],
         debug=False
-    )
+)
