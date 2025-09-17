@@ -1337,6 +1337,7 @@ def handle_stream_response(response, model):
             logger.info(f"使用 Agent 模型专用逻辑处理: {model}", "Server")
             stream = response.iter_lines()
             is_in_think_block = False
+            emitted_content_from_tokens = False
 
             for chunk in stream:
                 if not chunk: continue
@@ -1351,27 +1352,45 @@ def handle_stream_response(response, model):
                             if card_data.get("id") and card_data.get("url"):
                                 citations[card_data["id"]] = card_data["url"]
                         except json.JSONDecodeError: pass
+
+                    # 忽略 streaming 末尾重复的整体 modelResponse，除非前面没收到任何 token
+                    if isinstance(response_data.get("modelResponse"), dict):
+                        if emitted_content_from_tokens:
+                            continue
+                        clean_message = Utils.safe_filter_grok_tags(response_data["modelResponse"].get("message", ""), citations)
+                        if clean_message:
+                            if is_in_think_block:
+                                is_in_think_block = False
+                                payload = MessageProcessor.create_chat_response('</think>\n\n', model, True)
+                                yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
+                            payload = MessageProcessor.create_chat_response(clean_message, model, True)
+                            yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
+                        continue
+
                     result = process_model_response(response_data, model)
                     if result.get("type") == 'heartbeat':
                         yield b": ping\n\n"
                         continue
-                    if result.get("token") is not None:
+                    if result.get("token"):
                         if result.get("type") == 'thinking':
                             if not is_in_think_block:
                                 is_in_think_block = True
                                 payload = MessageProcessor.create_chat_response('<think>\n', model, True)
                                 yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
                             clean_token = Utils.safe_filter_grok_tags(result["token"], citations)
-                            payload = MessageProcessor.create_chat_response(clean_token, model, True)
-                            yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
+                            if clean_token:
+                                payload = MessageProcessor.create_chat_response(clean_token, model, True)
+                                yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
                         elif result.get("type") == 'content':
                             if is_in_think_block:
                                 is_in_think_block = False
                                 payload = MessageProcessor.create_chat_response('</think>\n\n', model, True)
                                 yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
                             clean_token = Utils.safe_filter_grok_tags(result["token"], citations)
-                            payload = MessageProcessor.create_chat_response(clean_token, model, True)
-                            yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
+                            if clean_token:
+                                emitted_content_from_tokens = True
+                                payload = MessageProcessor.create_chat_response(clean_token, model, True)
+                                yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
                 except Exception as e:
                     logger.error(f"处理 Agent 流时出错: {str(e)}", "Server")
                     continue
@@ -1412,17 +1431,14 @@ def handle_stream_response(response, model):
                             break 
                     if is_img_gen and not is_img_gen2:
                         continue
-                    
-                    # --- 语法修复点在这里 ---
                     is_process_info = (
                         response_data.get("isThinking") or 
                         response_data.get("messageStepId") or
                         response_data.get("modelResponse") or
                         response_data.get("messageTag") not in [None, "final"]
-                    ) # <--- 这个括号之前被我漏掉了
-                    
+                    )
                     token = response_data.get("token")
-                    if token is not None and not is_process_info:
+                    if token and not is_process_info:
                         clean_token = Utils.safe_filter_grok_tags(token, citations)
                         payload = MessageProcessor.create_chat_response(clean_token, model, True)
                         yield f"data: {json.dumps(payload)}\n\n".encode('utf-8')
@@ -1703,7 +1719,7 @@ def chat_completions():
                         data=json.dumps(request_payload),
                         impersonate="chrome133a",
                         stream=True,
-                        timeout=(10, 1200), # 加上我们之前讨论的防超时设置
+                        timeout=(10, 1800), # 加上我们之前讨论的防超时设置
                         **request_kwargs
                     )
 
@@ -1774,4 +1790,4 @@ if __name__ == '__main__':
         host='0.0.0.0',
         port=CONFIG["SERVER"]["PORT"],
         debug=False
-            )
+                            )
