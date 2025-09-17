@@ -19,7 +19,7 @@ cp .env.sample .env
 ```bash
 bash ./rebuild.sh
 ```
-### 最后根据自己的实际情况使用api或管理token
+### 最后根据自己的实际情况使用api或管理token，heavy模型只有SSO_HEAVY模型能用，项目运行在4444端口
 
 ## 项目简介
 本项目提供了一种简单、高效的方式通过 Docker 部署 使用openAI的格式转换调用grok官网，进行api处理。
