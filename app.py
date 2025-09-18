@@ -148,11 +148,12 @@ CONFIG = {
         'grok-4-heavy': 'grok-4-heavy',
         'grok-4': 'grok-4',
         'grok-4-imageGen': 'grok-4',
+        'grok-4-fast': 'grok-4',
         #'grok-4-search': 'grok-4',
         "grok-3": "grok-3",
         #"grok-3-search": "grok-3",
         "grok-3-imageGen": "grok-3",
-        #"grok-3-deepsearch": "grok-3",
+        "grok-4-mini-thinking-tahoe": "grok-4-mini-thinking-tahoe",
         #"grok-3-deepersearch": "grok-3",
         #"grok-3-reasoning": "grok-3"
     },
@@ -356,7 +357,7 @@ class AuthTokenManager:
         self.model_normal_config = {
             "grok-4":              { "RequestFrequency": 20, "ExpirationTime": 24 * 60 * 60 * 1000 },
             "grok-3":              { "RequestFrequency": 30, "ExpirationTime": 2 * 60 * 60 * 1000 },
-            #"grok-3-deepsearch":   { "RequestFrequency": 10, "ExpirationTime": 24 * 60 * 60 * 1000 },
+            #"grok-4-mini":         { "RequestFrequency": 100,  "ExpirationTime": 24 * 60 * 60 * 1000 },
             #"grok-3-deepersearch": { "RequestFrequency": 5, "ExpirationTime": 24 * 60 * 60 * 1000 },
             #"grok-3-reasoning":    { "RequestFrequency": 8, "ExpirationTime": 24 * 60 * 60 * 1000 }
         }
@@ -368,7 +369,7 @@ class AuthTokenManager:
             "grok-3":              { "RequestFrequency": 150, "ExpirationTime": 2 * 60 * 60 * 1000 },
             #"grok-3-deepsearch":   { "RequestFrequency": 50,  "ExpirationTime": 24 * 60 * 60 * 1000 },
             #"grok-3-deepersearch": { "RequestFrequency": 25,  "ExpirationTime": 24 * 60 * 60 * 1000 },
-            #"grok-3-reasoning":    { "RequestFrequency": 40,  "ExpirationTime": 24 * 60 * 60 * 1000 },
+            "grok-4-mini-thinking-tahoe":         { "RequestFrequency": 1000,  "ExpirationTime": 24 * 60 * 60 * 1000 },
             # 只有 Heavy 账号可以访问 heavy 模型
             "grok-4-heavy":        { "RequestFrequency": 20,  "ExpirationTime": 24 * 60 * 60 * 1000 }
         }
@@ -558,7 +559,7 @@ class AuthTokenManager:
     # --- 以下是你版本中独有的、必须保留的辅助方法 ---
     def normalize_model_name(self, model):
         # grok-4-heavy 必须被正确处理，不能被 normalize 成 grok-4
-        if model == 'grok-4-heavy':
+        if model in {'grok-4-heavy', 'grok-4-mini-thinking-tahoe'}:
             return model
         if model.startswith('grok-') and 'deepsearch' not in model and 'reasoning' not in model:
             return '-'.join(model.split('-')[:2])
@@ -855,7 +856,6 @@ class GrokApiClient:
         }
         
     def upload_base64_file(self, message, model):
-        # 这个函数已经是正确的，保持不变，作为参考。
         try:
             message_base64 = base64.b64encode(message.encode('utf-8')).decode('utf-8')
             upload_data = {
@@ -897,7 +897,7 @@ class GrokApiClient:
             logger.error(str(error), "Server")
             raise Exception(f"上传文件失败,状态码:{response.status_code}")
 
-    def upload_base64_image(self, base64_data, url, model): # 增加了 model 参数
+    def upload_base64_image(self, base64_data, url, model):
         try:
             if 'data:image' in base64_data:
                 image_buffer = base64_data.split(',')[1]
@@ -908,7 +908,6 @@ class GrokApiClient:
             mime_type = image_info["mimeType"]
             file_name = image_info["fileName"]
 
-            # <<< 核心变更 1: 修正 Payload 结构，移除 rpc 和 req 包装
             upload_data = {
                 "fileName": file_name,
                 "fileMimeType": mime_type,
@@ -918,14 +917,11 @@ class GrokApiClient:
             logger.info("发送图片文件请求", "Server")
 
             proxy_options = Utils.get_proxy_options()
-            # 需要 cookie 来进行认证
             cookie = f"{Utils.create_auth_headers(model, True)};{CONFIG['SERVER']['CF_CLEARANCE']}"
 
-            # <<< 核心变更 2: 使用智能重试机制发起请求
             def make_image_upload_request(**request_kwargs):
-                # <<< 核心变更 3: 确保使用正确的 URL
                 return curl_requests.post(
-                    url, # URL 将从调用处传入，确保是正确的 /rest/app-chat/upload-file
+                    url,
                     json=upload_data,
                     impersonate="chrome133a",
                     **request_kwargs
@@ -935,7 +931,7 @@ class GrokApiClient:
                 make_image_upload_request,
                 headers={
                     **get_default_headers(),
-                    "Cookie": cookie # <<< 核心变更 4: 传入认证 Cookie
+                    "Cookie": cookie
                 },
                 **proxy_options
             )
@@ -951,7 +947,6 @@ class GrokApiClient:
         except Exception as error:
             logger.error(f"上传图片时发生异常: {str(error)}", "Server")
             return ''
-
 
     def prepare_chat_request(self, request):
         if ((request["model"] == 'grok-4-imageGen' or request["model"] == 'grok-3-imageGen') and
@@ -1009,24 +1004,21 @@ class GrokApiClient:
                 if isinstance(current["content"], list):
                     for item in current["content"]:
                         if item["type"] == 'image_url':
-                            # <<< 核心变更 5: 调用 upload_base64_image 时传入正确的 URL 和 model
                             processed_image = self.upload_base64_image(
                                 item["image_url"]["url"],
                                 f"{CONFIG['API']['BASE_URL']}/rest/app-chat/upload-file",
-                                request["model"] # 传入 model 用于获取 token
+                                request["model"]
                             )
                             if processed_image:
                                 file_attachments.append(processed_image)
                 elif isinstance(current["content"], dict) and current["content"].get("type") == 'image_url':
-
                     processed_image = self.upload_base64_image(
                         current["content"]["image_url"]["url"],
                         f"{CONFIG['API']['BASE_URL']}/rest/app-chat/upload-file",
-                        request["model"] # 传入 model 用于获取 token
+                        request["model"]
                     )
                     if processed_image:
                         file_attachments.append(processed_image)
-
 
             text_content = process_content(current.get("content", ""))
             if is_last_message and convert_to_file:
@@ -1054,7 +1046,11 @@ class GrokApiClient:
                 messages = '基于txt文件内容进行回复：'
             else:
                 raise ValueError('消息内容为空!')
-        return {
+
+        req_model = request.get("model")
+        is_fast = req_model in ("grok-4-fast", "grok-3-fast")
+        
+        payload = {
             "temporary": CONFIG["API"].get("IS_TEMP_CONVERSATION", False),
             "modelName": self.model_id,
             "message": messages.strip(),
@@ -1082,7 +1078,18 @@ class GrokApiClient:
             "isReasoning": request["model"] == 'grok-3-reasoning',
             "disableTextFollowUps": True
         }
-
+        
+        # 仅在 -fast 变体时附带 fast/low 提示
+        if is_fast:
+            payload["mode"] = "fast"        # 抓包里看到的顶层模式
+            payload["effort"] = "low"       # 抓包里 effort=low
+            payload["requestMetadata"] = {  # 响应里是这个驼峰键；请求侧也用它
+                "model": self.model_id,     # 映射后：grok-4 或 grok-3
+                "mode": "MODEL_MODE_FAST",
+                "effort": "LOW"
+            }
+        
+        return payload
 class MessageProcessor:
     @staticmethod
     def create_chat_response(message, model, is_stream=False):
@@ -1790,4 +1797,4 @@ if __name__ == '__main__':
         host='0.0.0.0',
         port=CONFIG["SERVER"]["PORT"],
         debug=False
-                            )
+                                                      )
