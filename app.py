@@ -148,7 +148,7 @@ CONFIG = {
         'grok-4-heavy': 'grok-4-heavy',
         'grok-4': 'grok-4',
         'grok-4-imageGen': 'grok-4',
-        'grok-4-fast': 'grok-4',
+        #'grok-4-fast': 'grok-4',
         #'grok-4-search': 'grok-4',
         "grok-3": "grok-3",
         #"grok-3-search": "grok-3",
@@ -357,7 +357,7 @@ class AuthTokenManager:
         self.model_normal_config = {
             "grok-4":              { "RequestFrequency": 20, "ExpirationTime": 24 * 60 * 60 * 1000 },
             "grok-3":              { "RequestFrequency": 30, "ExpirationTime": 2 * 60 * 60 * 1000 },
-            #"grok-4-mini":         { "RequestFrequency": 100,  "ExpirationTime": 24 * 60 * 60 * 1000 },
+            "grok-4-mini-thinking-tahoe":         { "RequestFrequency": 1000,  "ExpirationTime": 24 * 60 * 60 * 1000 },
             #"grok-3-deepersearch": { "RequestFrequency": 5, "ExpirationTime": 24 * 60 * 60 * 1000 },
             #"grok-3-reasoning":    { "RequestFrequency": 8, "ExpirationTime": 24 * 60 * 60 * 1000 }
         }
@@ -1127,7 +1127,7 @@ class MessageProcessor:
 
 def process_model_response(response, model):
     result = {"token": None, "type": None} 
-    AGENT_MODELS = ['grok-4-heavy', 'grok-4', 'grok-3-deepersearch', 'grok-3-deepsearch']
+    AGENT_MODELS = ['grok-4-heavy', 'grok-4', 'grok-3-deepersearch', 'grok-3-deepsearch', 'grok-4-mini-thinking-tahoe']
 
     if response.get("cachedImageGenerationResponse"):
         return result 
@@ -1278,7 +1278,7 @@ def handle_non_stream_response(response, model):
     image_url_found = None
     citations = {}
 
-    AGENT_MODELS = ['grok-4-heavy', 'grok-4', 'grok-3-deepersearch', 'grok-3-deepsearch']
+    AGENT_MODELS = ['grok-4-heavy', 'grok-4', 'grok-3-deepersearch', 'grok-3-deepsearch', 'grok-4-mini-thinking-tahoe']
 
     for chunk in stream:
         if not chunk: continue
@@ -1337,7 +1337,7 @@ def handle_stream_response(response, model):
     yield f"data: {json.dumps(initial_payload)}\n\n".encode('utf-8')
 
     citations = {}
-    AGENT_MODELS = ['grok-4-heavy', 'grok-4', 'grok-3-deepersearch', 'grok-3-deepsearch']
+    AGENT_MODELS = ['grok-4-heavy', 'grok-4', 'grok-3-deepersearch', 'grok-3-deepsearch', 'grok-4-mini-thinking-tahoe']
 
     if model in AGENT_MODELS:
         def generate_agent():
@@ -1797,4 +1797,4 @@ if __name__ == '__main__':
         host='0.0.0.0',
         port=CONFIG["SERVER"]["PORT"],
         debug=False
-                                                      )
+    )
